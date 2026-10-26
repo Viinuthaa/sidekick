@@ -15,11 +15,9 @@ const STORAGE_KEY = 'sidekick-sessions'
 function loadSessions(): Session[] {
   try {
     const saved = localStorage.getItem(STORAGE_KEY)
-
     if (!saved) return []
 
     const parsed: unknown = JSON.parse(saved)
-
     if (!Array.isArray(parsed)) return []
 
     return parsed.filter(
@@ -72,6 +70,14 @@ function App() {
     setMeetingTitle('')
     setShowSetup(false)
     setPage('sessions')
+  }
+
+  function deleteSession(id: number) {
+    setSessions((current) => current.filter((session) => session.id !== id))
+
+    if (activeSession?.id === id) {
+      setActiveSession(null)
+    }
   }
 
   function openPage(nextPage: Page) {
@@ -268,6 +274,13 @@ function App() {
                     Created {activeSession.createdAt}
                   </p>
 
+                  <button
+                    className="delete-session detail-delete"
+                    onClick={() => deleteSession(activeSession.id)}
+                  >
+                    Delete session
+                  </button>
+
                   <div className="capture-placeholder">
                     <div className="orbit detail-orbit" aria-hidden="true">
                       <span />
@@ -302,18 +315,28 @@ function App() {
               ) : (
                 <div className="session-list">
                   {sessions.map((session) => (
-                    <button
-                      className="session-row"
-                      key={session.id}
-                      onClick={() => setActiveSession(session)}
-                    >
-                      <span className="row-symbol">↗</span>
-                      <span className="row-details">
-                        <strong>{session.title}</strong>
-                        <small>{session.createdAt}</small>
-                      </span>
-                      <span className="row-arrow">→</span>
-                    </button>
+                    <div className="session-row" key={session.id}>
+                      <button
+                        className="session-row-open"
+                        onClick={() => setActiveSession(session)}
+                      >
+                        <span className="row-symbol">↗</span>
+                        <span className="row-details">
+                          <strong>{session.title}</strong>
+                          <small>{session.createdAt}</small>
+                        </span>
+                        <span className="row-arrow">→</span>
+                      </button>
+
+                      <button
+                        className="delete-session"
+                        aria-label={`Delete ${session.title}`}
+                        title="Delete session"
+                        onClick={() => deleteSession(session.id)}
+                      >
+                        Delete
+                      </button>
+                    </div>
                   ))}
                 </div>
               )}
