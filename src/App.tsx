@@ -1,5 +1,5 @@
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import './App.css'
 
 type Session = {
@@ -10,12 +10,45 @@ type Session = {
 
 type Page = 'home' | 'sessions' | 'takeaways'
 
+const STORAGE_KEY = 'sidekick-sessions'
+
+function loadSessions(): Session[] {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY)
+
+    if (!saved) return []
+
+    const parsed: unknown = JSON.parse(saved)
+
+    if (!Array.isArray(parsed)) return []
+
+    return parsed.filter(
+      (item): item is Session =>
+        typeof item === 'object' &&
+        item !== null &&
+        typeof item.id === 'number' &&
+        typeof item.title === 'string' &&
+        typeof item.createdAt === 'string',
+    )
+  } catch {
+    return []
+  }
+}
+
 function App() {
   const [page, setPage] = useState<Page>('home')
   const [showSetup, setShowSetup] = useState(false)
   const [meetingTitle, setMeetingTitle] = useState('')
-  const [sessions, setSessions] = useState<Session[]>([])
+  const [sessions, setSessions] = useState<Session[]>(loadSessions)
   const [activeSession, setActiveSession] = useState<Session | null>(null)
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(sessions))
+    } catch (error) {
+      console.error('Could not save Sidekick sessions:', error)
+    }
+  }, [sessions])
 
   function createSession(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
