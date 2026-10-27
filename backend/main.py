@@ -1,11 +1,24 @@
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+import models
+from database import Base, engine
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    Base.metadata.create_all(bind=engine)
+    yield
+
 
 app = FastAPI(
     title="Sidekick API",
     description="Backend API for the Sidekick meeting copilot.",
-    version="0.1.0",
+    version="0.2.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -34,4 +47,17 @@ def health_check():
     return {
         "status": "ok",
         "service": "sidekick-api",
+    }
+
+
+@app.get("/api/database/health")
+def database_health_check():
+    from sqlalchemy import text
+
+    with engine.connect() as connection:
+        connection.execute(text("SELECT 1"))
+
+    return {
+        "status": "ok",
+        "database": "connected",
     }
