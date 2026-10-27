@@ -1,5 +1,5 @@
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import './App.css'
 
 type Session = {
@@ -7,6 +7,33 @@ type Session = {
   title: string
   createdAt: string
   notes?: string
+  transcript?: string
+}
+
+type SpeechResult = {
+  isFinal: boolean
+  0: { transcript: string }
+}
+
+type SpeechRecognitionEventLike = {
+  resultIndex: number
+  results: ArrayLike<SpeechResult>
+}
+
+type SpeechRecognitionLike = {
+  lang: string
+  continuous: boolean
+  interimResults: boolean
+  onresult: ((event: SpeechRecognitionEventLike) => void) | null
+  onerror: ((event: { error: string }) => void) | null
+  onend: (() => void) | null
+  start: () => void
+  stop: () => void
+}
+
+type SpeechRecognitionWindow = Window & {
+  SpeechRecognition?: new () => SpeechRecognitionLike
+  webkitSpeechRecognition?: new () => SpeechRecognitionLike
 }
 
 type Page = 'home' | 'sessions' | 'takeaways'
@@ -40,15 +67,17 @@ function App() {
   const [meetingTitle, setMeetingTitle] = useState('')
   const [sessions, setSessions] = useState<Session[]>(loadSessions)
   const [activeSession, setActiveSession] = useState<Session | null>(null)
-  const [microphoneStream, setMicrophoneStream] = useState<MediaStream | null>(null)
-  const [microphoneStatus, setMicrophoneStatus] = useState<'off' | 'requesting' | 'on' | 'error'>('off')
-  const [microphoneError, setMicrophoneError] = useState('')
+  const recognitionRef = useRef<SpeechRecognitionLike | null>(null)
+  const [transcriptionStatus, setTranscriptionStatus] = useState<'off' | 'starting' | 'on' | 'error'>('off')
+  const [transcriptionError, setTranscriptionError] = useState('')
+  const [interimTranscript, setInterimTranscript] = useState('')
 
   useEffect(() => {
     return () => {
-      microphoneStream?.getTracks().forEach((track) => track.stop())
+      recognitionRef.current?.stop()
+      recognitionRef.current = null
     }
-  }, [microphoneStream])
+  }, [])
 
   useEffect(() => {
     try {
@@ -58,39 +87,103 @@ function App() {
     }
   }, [sessions])
 
-  async function enableMicrophone() {
-    setMicrophoneError('')
+  function startTranscription() {
+    if (!activeSession) return
 
-    if (!navigator.mediaDevices?.getUserMedia) {
-      setMicrophoneStatus('error')
-      setMicrophoneError('Microphone access is unavailable in this browser or page context. Try localhost or HTTPS in a supported browser.')
+    setTranscriptionError('')
+    setInterimTranscript('')
+
+    const speechWindow = window as SpeechRecognitionWindow
+    const Recognition = speechWindow.SpeechRecognition ?? speechWindow.webkitSpeechRecognition
+
+    if (!Recognition) {
+      setTranscriptionStatus('error')
+      setTranscriptionError(
+        'Live speech recognition is not supported in this browser. Try a current version of Google Chrome or Microsoft Edge.',
+      )
       return
     }
 
-    setMicrophoneStatus('requesting')
-
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      setMicrophoneStream(stream)
-      setMicrophoneStatus('on')
-    } catch (error) {
-      setMicrophoneStatus('error')
+      const recognition = new Recognition()
+      recognition.lang = 'en-US'
+      recognition.continuous = true
+      recognition.interimResults = true
 
-      if (error instanceof DOMException && error.name === 'NotAllowedError') {
-        setMicrophoneError('Microphone permission was denied. Allow microphone access in your browser settings, then try again.')
-      } else if (error instanceof DOMException && error.name === 'NotFoundError') {
-        setMicrophoneError('No microphone was found. Connect a microphone and try again.')
-      } else {
-        setMicrophoneError('Could not access the microphone. Check your device and browser permissions, then try again.')
+      recognition.onresult = (event) => {
+        let finalText = ''
+        let interimText = ''
+
+        for (let index = event.resultIndex; index < event.results.length; index += 1) {
+          const result = event.results[index]
+          if (!result?.[0]?.transcript) continue
+
+          if (result.isFinal) {
+            finalText += `${result[0].transcript.trim()} `
+          } else {
+            interimText += `${result[0].transcript} `
+          }
+        }
+
+        if (finalText.trim()) {
+          setSessions((current) =>
+            current.map((session) => {
+              if (session.id !== activeSession.id) return session
+              const existing = session.transcript?.trim() ?? ''
+              const addition = finalText.trim()
+              return {
+                ...session,
+                transcript: existing ? `${existing} ${addition}` : addition,
+              }
+            }),
+          )
+          setActiveSession((current) => {
+            if (!current || current.id !== activeSession.id) return current
+            const existing = current.transcript?.trim() ?? ''
+            const addition = finalText.trim()
+            return { ...current, transcript: existing ? `${existing} ${addition}` : addition }
+          })
+        }
+
+        setInterimTranscript(interimText.trim())
       }
+
+      recognition.onerror = (event) => {
+        setTranscriptionStatus('error')
+        if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+          setTranscriptionError('Microphone or speech recognition permission was denied. Check your browser permissions and try again.')
+        } else if (event.error === 'no-speech') {
+          setTranscriptionError('No speech was detected. Try speaking closer to your microphone.')
+        } else {
+          setTranscriptionError(`Speech recognition stopped: ${event.error}. You can try starting it again.`)
+        }
+        recognitionRef.current = null
+      }
+
+      recognition.onend = () => {
+        if (recognitionRef.current === recognition) {
+          recognitionRef.current = null
+          setTranscriptionStatus((status) => status === 'on' ? 'off' : status)
+        }
+      }
+
+      recognitionRef.current = recognition
+      setTranscriptionStatus('starting')
+      recognition.start()
+      setTranscriptionStatus('on')
+    } catch {
+      recognitionRef.current = null
+      setTranscriptionStatus('error')
+      setTranscriptionError('Could not start speech recognition. Check your browser permissions and try again.')
     }
   }
 
-  function stopMicrophone() {
-    microphoneStream?.getTracks().forEach((track) => track.stop())
-    setMicrophoneStream(null)
-    setMicrophoneStatus('off')
-    setMicrophoneError('')
+  function stopTranscription() {
+    recognitionRef.current?.stop()
+    recognitionRef.current = null
+    setTranscriptionStatus('off')
+    setInterimTranscript('')
+    setTranscriptionError('')
   }
 
   function createSession(event: React.FormEvent<HTMLFormElement>) {
@@ -119,7 +212,7 @@ function App() {
   }
 
   function deleteSession(id: number) {
-    if (activeSession?.id === id) stopMicrophone()
+    if (activeSession?.id === id) stopTranscription()
     setSessions((current) => current.filter((session) => session.id !== id))
 
     if (activeSession?.id === id) {
@@ -140,13 +233,13 @@ function App() {
   }
 
   function openPage(nextPage: Page) {
-    stopMicrophone()
+    stopTranscription()
     setPage(nextPage)
     setActiveSession(null)
   }
 
   function openSession(session: Session) {
-    if (activeSession?.id !== session.id) stopMicrophone()
+    if (activeSession?.id !== session.id) stopTranscription()
     setActiveSession(session)
     setPage('sessions')
   }
@@ -353,72 +446,66 @@ function App() {
                         <span className="panel-icon" aria-hidden="true">◌</span>
                       </div>
 
-                      <div className="conversation-empty">
-                        <div className="conversation-mark" aria-hidden="true">
-                          <span />
-                          <span />
-                          <span />
-                          <span />
-                          <span />
-                        </div>
-                        <h3>Make room for the conversation.</h3>
-                        <p>
-                          When live transcription is connected, your meeting
-                          transcript will appear here.
-                        </p>
-                        <span className="feature-label">
-                          LIVE TRANSCRIPTION · COMING LATER
-                        </span>
+                      <div className="transcript-content" aria-live="polite" aria-relevant="additions text">
+                        {activeSession.transcript ? (
+                          <p className="transcript-text">{activeSession.transcript}</p>
+                        ) : (
+                          <div className="conversation-empty">
+                            <div className="conversation-mark" aria-hidden="true">
+                              <span />
+                              <span />
+                              <span />
+                              <span />
+                              <span />
+                            </div>
+                            <h3>Your words, as they happen.</h3>
+                            <p>
+                              Start live transcription and recognized speech will appear here.
+                            </p>
+                          </div>
+                        )}
+                        {interimTranscript && (
+                          <p className="transcript-interim">{interimTranscript}</p>
+                        )}
                       </div>
 
                       <div className="microphone-setup">
                         <div className="microphone-status-line">
-                          <span className={`microphone-status-dot ${microphoneStatus}`} />
+                          <span className={`microphone-status-dot ${transcriptionStatus === 'on' ? 'on' : transcriptionStatus === 'error' ? 'error' : transcriptionStatus === 'starting' ? 'requesting' : ''}`} />
                           <span>
-                            {microphoneStatus === 'on'
-                              ? 'Microphone connected'
-                              : microphoneStatus === 'requesting'
-                                ? 'Waiting for permission…'
-                                : microphoneStatus === 'error'
-                                  ? 'Microphone unavailable'
-                                  : 'Microphone is off'}
+                            {transcriptionStatus === 'on'
+                              ? 'Live transcription is on'
+                              : transcriptionStatus === 'starting'
+                                ? 'Starting speech recognition…'
+                                : transcriptionStatus === 'error'
+                                  ? 'Transcription unavailable'
+                                  : 'Live transcription is off'}
                           </span>
                         </div>
 
-                        {microphoneError && (
-                          <p className="microphone-error" role="alert">
-                            {microphoneError}
-                          </p>
+                        {transcriptionError && (
+                          <p className="microphone-error" role="alert">{transcriptionError}</p>
                         )}
 
-                        {microphoneStatus === 'on' ? (
-                          <button
-                            className="microphone-button microphone-stop"
-                            onClick={stopMicrophone}
-                          >
-                            <span aria-hidden="true">■</span> Stop microphone
+                        {transcriptionStatus === 'on' ? (
+                          <button className="microphone-button microphone-stop" onClick={stopTranscription}>
+                            <span aria-hidden="true">■</span> Stop transcription
                           </button>
                         ) : (
-                          <button
-                            className="microphone-button"
-                            onClick={enableMicrophone}
-                            disabled={microphoneStatus === 'requesting'}
-                          >
+                          <button className="microphone-button" onClick={startTranscription} disabled={transcriptionStatus === 'starting'}>
                             <span aria-hidden="true">◉</span>
-                            {microphoneStatus === 'requesting'
-                              ? 'Requesting access…'
-                              : 'Enable microphone'}
+                            {transcriptionStatus === 'starting' ? 'Starting…' : 'Start live transcription'}
                           </button>
                         )}
 
                         <p className="microphone-disclaimer">
-                          Microphone access only. Sidekick is not recording or transcribing audio yet.
+                          Uses your browser’s speech recognition. Support and processing vary by browser; speech may be sent to the browser provider’s service.
                         </p>
                       </div>
 
                       <div className="panel-footer">
                         <span>Transcript</span>
-                        <span>Waiting for transcription setup</span>
+                        <span>{transcriptionStatus === 'on' ? 'Listening for speech' : 'Ready when you are'}</span>
                       </div>
                     </section>
 
