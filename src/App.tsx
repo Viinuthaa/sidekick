@@ -8,6 +8,7 @@ type Session = {
   createdAt: string
   notes?: string
   transcript?: string
+  transcriptEntries?: { id: string; time: string; text: string }[]
 }
 
 type SpeechResult = {
@@ -126,22 +127,36 @@ function App() {
         }
 
         if (finalText.trim()) {
+          const addition = finalText.trim()
+          const entry = {
+            id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            time: new Date().toLocaleTimeString([], {
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit',
+            }),
+            text: addition,
+          }
+
           setSessions((current) =>
             current.map((session) => {
               if (session.id !== activeSession.id) return session
               const existing = session.transcript?.trim() ?? ''
-              const addition = finalText.trim()
               return {
                 ...session,
                 transcript: existing ? `${existing} ${addition}` : addition,
+                transcriptEntries: [...(session.transcriptEntries ?? []), entry],
               }
             }),
           )
           setActiveSession((current) => {
             if (!current || current.id !== activeSession.id) return current
             const existing = current.transcript?.trim() ?? ''
-            const addition = finalText.trim()
-            return { ...current, transcript: existing ? `${existing} ${addition}` : addition }
+            return {
+              ...current,
+              transcript: existing ? `${existing} ${addition}` : addition,
+              transcriptEntries: [...(current.transcriptEntries ?? []), entry],
+            }
           })
         }
 
@@ -405,7 +420,7 @@ function App() {
                   <button
                     className="back-link"
                     onClick={() => {
-                      stopMicrophone()
+                      stopTranscription()
                       setActiveSession(null)
                     }}
                   >
@@ -447,8 +462,20 @@ function App() {
                       </div>
 
                       <div className="transcript-content" aria-live="polite" aria-relevant="additions text">
-                        {activeSession.transcript ? (
-                          <p className="transcript-text">{activeSession.transcript}</p>
+                        {activeSession.transcriptEntries?.length ? (
+                          <div className="transcript-entry-list">
+                            {activeSession.transcriptEntries.map((entry) => (
+                              <article className="transcript-entry" key={entry.id}>
+                                <time className="transcript-time">{entry.time}</time>
+                                <p className="transcript-entry-text">{entry.text}</p>
+                              </article>
+                            ))}
+                          </div>
+                        ) : activeSession.transcript ? (
+                          <article className="transcript-entry transcript-legacy-entry">
+                            <span className="transcript-time">Earlier transcript</span>
+                            <p className="transcript-entry-text">{activeSession.transcript}</p>
+                          </article>
                         ) : (
                           <div className="conversation-empty">
                             <div className="conversation-mark" aria-hidden="true">
@@ -460,12 +487,15 @@ function App() {
                             </div>
                             <h3>Your words, as they happen.</h3>
                             <p>
-                              Start live transcription and recognized speech will appear here.
+                              Start live transcription and recognized speech will appear here, with a timestamp for each captured segment.
                             </p>
                           </div>
                         )}
                         {interimTranscript && (
-                          <p className="transcript-interim">{interimTranscript}</p>
+                          <article className="transcript-entry transcript-entry-pending">
+                            <span className="transcript-time">Listening now</span>
+                            <p className="transcript-interim">{interimTranscript}</p>
+                          </article>
                         )}
                       </div>
 
@@ -504,8 +534,8 @@ function App() {
                       </div>
 
                       <div className="panel-footer">
-                        <span>Transcript</span>
-                        <span>{transcriptionStatus === 'on' ? 'Listening for speech' : 'Ready when you are'}</span>
+                        <span>Transcript · {activeSession.transcriptEntries?.length ?? (activeSession.transcript ? 1 : 0)} segments</span>
+                        <span>{transcriptionStatus === 'on' ? 'Listening for speech' : 'Saved to this session'}</span>
                       </div>
                     </section>
 
