@@ -6,6 +6,7 @@ type Session = {
   id: number
   title: string
   createdAt: string
+  notes?: string
 }
 
 type Page = 'home' | 'sessions' | 'takeaways'
@@ -63,6 +64,7 @@ function App() {
         hour: '2-digit',
         minute: '2-digit',
       }),
+      notes: '',
     }
 
     setSessions((current) => [session, ...current])
@@ -80,9 +82,26 @@ function App() {
     }
   }
 
+  function updateNotes(notes: string) {
+    if (!activeSession) return
+
+    const updatedSession = { ...activeSession, notes }
+    setActiveSession(updatedSession)
+    setSessions((current) =>
+      current.map((session) =>
+        session.id === updatedSession.id ? updatedSession : session,
+      ),
+    )
+  }
+
   function openPage(nextPage: Page) {
     setPage(nextPage)
     setActiveSession(null)
+  }
+
+  function openSession(session: Session) {
+    setActiveSession(session)
+    setPage('sessions')
   }
 
   return (
@@ -241,26 +260,8 @@ function App() {
 
           {page === 'sessions' && (
             <section className="subpage">
-              <p className="kicker">YOUR MEETINGS, IN ONE PLACE</p>
-
-              <div className="subpage-heading">
-                <div>
-                  <h1>Your sessions.</h1>
-                  <p className="intro-copy">
-                    Every conversation starts somewhere.
-                  </p>
-                </div>
-
-                <button
-                  className="start-session"
-                  onClick={() => setShowSetup(true)}
-                >
-                  New session <span aria-hidden="true">↗</span>
-                </button>
-              </div>
-
               {activeSession ? (
-                <div className="session-detail">
+                <div className="meeting-room">
                   <button
                     className="back-link"
                     onClick={() => setActiveSession(null)}
@@ -268,77 +269,157 @@ function App() {
                     ← All sessions
                   </button>
 
-                  <span className="session-index">SESSION DETAILS</span>
-                  <h2>{activeSession.title}</h2>
-                  <p className="session-date">
-                    Created {activeSession.createdAt}
-                  </p>
-
-                  <button
-                    className="delete-session detail-delete"
-                    onClick={() => deleteSession(activeSession.id)}
-                  >
-                    Delete session
-                  </button>
-
-                  <div className="capture-placeholder">
-                    <div className="orbit detail-orbit" aria-hidden="true">
-                      <span />
-                      <span />
-                      <span />
-                      <div className="orbit-core">s.</div>
+                  <div className="meeting-room-heading">
+                    <div>
+                      <span className="session-index">YOUR MEETING SPACE</span>
+                      <h1>{activeSession.title}</h1>
+                      <p className="session-date">
+                        Created {activeSession.createdAt}
+                      </p>
                     </div>
 
-                    <h3>The conversation starts here.</h3>
-                    <p>
-                      Session setup is ready. Live audio capture and
-                      transcription will be added in a later feature.
-                    </p>
-                    <span className="coming-soon">
-                      LIVE CAPTURE · COMING NEXT
-                    </span>
+                    <button
+                      className="delete-session"
+                      onClick={() => deleteSession(activeSession.id)}
+                    >
+                      Delete session
+                    </button>
+                  </div>
+
+                  <div className="meeting-status">
+                    <span className="meeting-status-dot" />
+                    <span>SESSION WORKSPACE</span>
+                    <span className="meeting-status-divider">/</span>
+                    <span>NOT RECORDING</span>
+                  </div>
+
+                  <div className="meeting-room-grid">
+                    <section className="meeting-panel conversation-panel">
+                      <div className="panel-heading">
+                        <div>
+                          <span className="panel-overline">01 / THE ROOM</span>
+                          <h2>Conversation</h2>
+                        </div>
+                        <span className="panel-icon" aria-hidden="true">◌</span>
+                      </div>
+
+                      <div className="conversation-empty">
+                        <div className="conversation-mark" aria-hidden="true">
+                          <span />
+                          <span />
+                          <span />
+                          <span />
+                          <span />
+                        </div>
+                        <h3>Make room for the conversation.</h3>
+                        <p>
+                          When live transcription is connected, your meeting
+                          transcript will appear here.
+                        </p>
+                        <span className="feature-label">
+                          LIVE TRANSCRIPTION · COMING LATER
+                        </span>
+                      </div>
+
+                      <div className="panel-footer">
+                        <span>Transcript</span>
+                        <span>Waiting for audio setup</span>
+                      </div>
+                    </section>
+
+                    <section className="meeting-panel notes-panel">
+                      <div className="panel-heading">
+                        <div>
+                          <span className="panel-overline">02 / KEEP CLOSE</span>
+                          <h2>Your notes</h2>
+                        </div>
+                        <span className="panel-icon" aria-hidden="true">✳</span>
+                      </div>
+
+                      <p className="notes-intro">
+                        Catch a thought before it slips away.
+                      </p>
+
+                      <label className="notes-label" htmlFor="meeting-notes">
+                        PERSONAL MEETING NOTES
+                      </label>
+                      <textarea
+                        id="meeting-notes"
+                        className="meeting-notes-input"
+                        value={activeSession.notes ?? ''}
+                        onChange={(event) => updateNotes(event.target.value)}
+                        placeholder={'• Things to follow up on...\n\n• Questions to ask...\n\n• Ideas worth keeping...'}
+                      />
+
+                      <div className="panel-footer notes-footer">
+                        <span>Private workspace</span>
+                        <span>Saved automatically</span>
+                      </div>
+                    </section>
                   </div>
                 </div>
-              ) : sessions.length === 0 ? (
-                <div className="empty-state">
-                  <span className="empty-mark">↗</span>
-                  <h2>Nothing here just yet.</h2>
-                  <p>Your first session will start the story.</p>
-
-                  <button
-                    className="start-session"
-                    onClick={() => setShowSetup(true)}
-                  >
-                    Create your first session <span aria-hidden="true">↗</span>
-                  </button>
-                </div>
               ) : (
-                <div className="session-list">
-                  {sessions.map((session) => (
-                    <div className="session-row" key={session.id}>
-                      <button
-                        className="session-row-open"
-                        onClick={() => setActiveSession(session)}
-                      >
-                        <span className="row-symbol">↗</span>
-                        <span className="row-details">
-                          <strong>{session.title}</strong>
-                          <small>{session.createdAt}</small>
-                        </span>
-                        <span className="row-arrow">→</span>
-                      </button>
+                <>
+                  <p className="kicker">YOUR MEETINGS, IN ONE PLACE</p>
+
+                  <div className="subpage-heading">
+                    <div>
+                      <h1>Your sessions.</h1>
+                      <p className="intro-copy">
+                        Every conversation starts somewhere.
+                      </p>
+                    </div>
+
+                    <button
+                      className="start-session"
+                      onClick={() => setShowSetup(true)}
+                    >
+                      New session <span aria-hidden="true">↗</span>
+                    </button>
+                  </div>
+
+                  {sessions.length === 0 ? (
+                    <div className="empty-state">
+                      <span className="empty-mark">↗</span>
+                      <h2>Nothing here just yet.</h2>
+                      <p>Your first session will start the story.</p>
 
                       <button
-                        className="delete-session"
-                        aria-label={`Delete ${session.title}`}
-                        title="Delete session"
-                        onClick={() => deleteSession(session.id)}
+                        className="start-session"
+                        onClick={() => setShowSetup(true)}
                       >
-                        Delete
+                        Create your first session <span aria-hidden="true">↗</span>
                       </button>
                     </div>
-                  ))}
-                </div>
+                  ) : (
+                    <div className="session-list">
+                      {sessions.map((session) => (
+                        <div className="session-row" key={session.id}>
+                          <button
+                            className="session-row-open"
+                            onClick={() => openSession(session)}
+                          >
+                            <span className="row-symbol">↗</span>
+                            <span className="row-details">
+                              <strong>{session.title}</strong>
+                              <small>{session.createdAt}</small>
+                            </span>
+                            <span className="row-arrow">→</span>
+                          </button>
+
+                          <button
+                            className="delete-session"
+                            aria-label={`Delete ${session.title}`}
+                            title="Delete session"
+                            onClick={() => deleteSession(session.id)}
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
               )}
             </section>
           )}
