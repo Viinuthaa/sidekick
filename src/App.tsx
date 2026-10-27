@@ -40,6 +40,15 @@ function App() {
   const [meetingTitle, setMeetingTitle] = useState('')
   const [sessions, setSessions] = useState<Session[]>(loadSessions)
   const [activeSession, setActiveSession] = useState<Session | null>(null)
+  const [microphoneStream, setMicrophoneStream] = useState<MediaStream | null>(null)
+  const [microphoneStatus, setMicrophoneStatus] = useState<'off' | 'requesting' | 'on' | 'error'>('off')
+  const [microphoneError, setMicrophoneError] = useState('')
+
+  useEffect(() => {
+    return () => {
+      microphoneStream?.getTracks().forEach((track) => track.stop())
+    }
+  }, [microphoneStream])
 
   useEffect(() => {
     try {
@@ -48,6 +57,41 @@ function App() {
       console.error('Could not save Sidekick sessions:', error)
     }
   }, [sessions])
+
+  async function enableMicrophone() {
+    setMicrophoneError('')
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setMicrophoneStatus('error')
+      setMicrophoneError('Microphone access is unavailable in this browser or page context. Try localhost or HTTPS in a supported browser.')
+      return
+    }
+
+    setMicrophoneStatus('requesting')
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      setMicrophoneStream(stream)
+      setMicrophoneStatus('on')
+    } catch (error) {
+      setMicrophoneStatus('error')
+
+      if (error instanceof DOMException && error.name === 'NotAllowedError') {
+        setMicrophoneError('Microphone permission was denied. Allow microphone access in your browser settings, then try again.')
+      } else if (error instanceof DOMException && error.name === 'NotFoundError') {
+        setMicrophoneError('No microphone was found. Connect a microphone and try again.')
+      } else {
+        setMicrophoneError('Could not access the microphone. Check your device and browser permissions, then try again.')
+      }
+    }
+  }
+
+  function stopMicrophone() {
+    microphoneStream?.getTracks().forEach((track) => track.stop())
+    setMicrophoneStream(null)
+    setMicrophoneStatus('off')
+    setMicrophoneError('')
+  }
 
   function createSession(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -75,6 +119,7 @@ function App() {
   }
 
   function deleteSession(id: number) {
+    if (activeSession?.id === id) stopMicrophone()
     setSessions((current) => current.filter((session) => session.id !== id))
 
     if (activeSession?.id === id) {
@@ -95,11 +140,13 @@ function App() {
   }
 
   function openPage(nextPage: Page) {
+    stopMicrophone()
     setPage(nextPage)
     setActiveSession(null)
   }
 
   function openSession(session: Session) {
+    if (activeSession?.id !== session.id) stopMicrophone()
     setActiveSession(session)
     setPage('sessions')
   }
@@ -264,7 +311,10 @@ function App() {
                 <div className="meeting-room">
                   <button
                     className="back-link"
-                    onClick={() => setActiveSession(null)}
+                    onClick={() => {
+                      stopMicrophone()
+                      setActiveSession(null)
+                    }}
                   >
                     ← All sessions
                   </button>
@@ -321,9 +371,54 @@ function App() {
                         </span>
                       </div>
 
+                      <div className="microphone-setup">
+                        <div className="microphone-status-line">
+                          <span className={`microphone-status-dot ${microphoneStatus}`} />
+                          <span>
+                            {microphoneStatus === 'on'
+                              ? 'Microphone connected'
+                              : microphoneStatus === 'requesting'
+                                ? 'Waiting for permission…'
+                                : microphoneStatus === 'error'
+                                  ? 'Microphone unavailable'
+                                  : 'Microphone is off'}
+                          </span>
+                        </div>
+
+                        {microphoneError && (
+                          <p className="microphone-error" role="alert">
+                            {microphoneError}
+                          </p>
+                        )}
+
+                        {microphoneStatus === 'on' ? (
+                          <button
+                            className="microphone-button microphone-stop"
+                            onClick={stopMicrophone}
+                          >
+                            <span aria-hidden="true">■</span> Stop microphone
+                          </button>
+                        ) : (
+                          <button
+                            className="microphone-button"
+                            onClick={enableMicrophone}
+                            disabled={microphoneStatus === 'requesting'}
+                          >
+                            <span aria-hidden="true">◉</span>
+                            {microphoneStatus === 'requesting'
+                              ? 'Requesting access…'
+                              : 'Enable microphone'}
+                          </button>
+                        )}
+
+                        <p className="microphone-disclaimer">
+                          Microphone access only. Sidekick is not recording or transcribing audio yet.
+                        </p>
+                      </div>
+
                       <div className="panel-footer">
                         <span>Transcript</span>
-                        <span>Waiting for audio setup</span>
+                        <span>Waiting for transcription setup</span>
                       </div>
                     </section>
 
