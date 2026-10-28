@@ -104,6 +104,7 @@ function App() {
   const [apiError, setApiError] = useState('')
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null)
   const transcriptRef = useRef('')
+  const notesSaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [transcriptionStatus, setTranscriptionStatus] = useState<
     'off' | 'starting' | 'on' | 'error'
   >('off')
@@ -114,6 +115,9 @@ function App() {
     return () => {
       recognitionRef.current?.stop()
       recognitionRef.current = null
+      if (notesSaveTimeoutRef.current) {
+        clearTimeout(notesSaveTimeoutRef.current)
+      }
     }
   }, [])
 
@@ -411,33 +415,44 @@ function App() {
     }
   }
 
-  async function updateNotes(notes: string) {
+  function updateNotes(notes: string) {
     if (!activeSession) return
 
     const sessionId = activeSession.id
-    const updatedSession = { ...activeSession, notes }
 
-    setActiveSession(updatedSession)
+    setActiveSession((current) =>
+      current?.id === sessionId ? { ...current, notes } : current,
+    )
+
     setSessions((current) =>
       current.map((session) =>
-        session.id === sessionId ? updatedSession : session,
+        session.id === sessionId ? { ...session, notes } : session,
       ),
     )
 
-    try {
-      setApiError('')
+    if (notesSaveTimeoutRef.current) {
+      clearTimeout(notesSaveTimeoutRef.current)
+    }
 
-      await apiRequest<ApiMeeting>(`/api/meetings/${sessionId}`, {
+    notesSaveTimeoutRef.current = setTimeout(() => {
+      notesSaveTimeoutRef.current = null
+
+      void apiRequest<ApiMeeting>(`/api/meetings/${sessionId}`, {
         method: 'PATCH',
         body: JSON.stringify({ notes }),
       })
-    } catch (error) {
-      setApiError(
-        error instanceof Error
-          ? error.message
-          : 'Could not save your notes.',
-      )
-    }
+        .then(() => {
+          setApiError('')
+        })
+        .catch((error) => {
+          console.error('Could not save notes:', error)
+          setApiError(
+            error instanceof Error
+              ? `Notes could not be saved: ${error.message}`
+              : 'Could not save your notes.',
+          )
+        })
+    }, 500)
   }
 
   function openPage(nextPage: Page) {
@@ -524,9 +539,7 @@ function App() {
             <span>Here for the details</span>
           </div>
         </div>
-      </aside>
-
-      <main className="page">
+      </aside>      <main className="page">
         <header className="topline">
           <a
             className="header-wordmark"
