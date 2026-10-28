@@ -22,3 +22,29 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Python virtual environment
+backend/.venv/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+
+# Local SQLite database
+backend/*.db
+
+# Local backup files
+src/App.backend-backup.tsx
+
+# Python virtual environment
+backend/.venv/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+
+# Local SQLite database
+backend/*.db
+
+# Local backup files
+src/App.backend-backup.tsx

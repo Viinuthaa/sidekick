@@ -1,5 +1,4 @@
-
-import { useEffect, useRef, useState } from 'react'
+﻿import { useEffect, useRef, useState } from 'react'
 import './App.css'
 
 type Session = {
@@ -39,37 +38,75 @@ type SpeechRecognitionWindow = Window & {
 
 type Page = 'home' | 'sessions' | 'takeaways'
 
-const STORAGE_KEY = 'sidekick-sessions'
+const API_BASE_URL = 'http://127.0.0.1:8000'
 
-function loadSessions(): Session[] {
-  try {
-    const saved = localStorage.getItem(STORAGE_KEY)
-    if (!saved) return []
+type ApiMeeting = {
+  id: number
+  title: string
+  transcript: string
+  notes: string
+  created_at: string
+}
 
-    const parsed: unknown = JSON.parse(saved)
-    if (!Array.isArray(parsed)) return []
+type ApiTranscriptSegment = {
+  id: number
+  meeting_id: number
+  time: string
+  text: string
+}
 
-    return parsed.filter(
-      (item): item is Session =>
-        typeof item === 'object' &&
-        item !== null &&
-        typeof item.id === 'number' &&
-        typeof item.title === 'string' &&
-        typeof item.createdAt === 'string',
-    )
-  } catch {
-    return []
+function toSession(meeting: ApiMeeting): Session {
+  return {
+    id: meeting.id,
+    title: meeting.title,
+    createdAt: new Date(meeting.created_at).toLocaleString([], {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    }),
+    notes: meeting.notes ?? '',
+    transcript: meeting.transcript ?? '',
+    transcriptEntries: [],
   }
+}
+
+async function apiRequest<T>(
+  path: string,
+  options: RequestInit = {},
+): Promise<T> {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+  })
+
+  if (!response.ok) {
+    throw new Error(`API request failed (${response.status})`)
+  }
+
+  if (response.status === 204) {
+    return undefined as T
+  }
+
+  return response.json() as Promise<T>
 }
 
 function App() {
   const [page, setPage] = useState<Page>('home')
   const [showSetup, setShowSetup] = useState(false)
   const [meetingTitle, setMeetingTitle] = useState('')
-  const [sessions, setSessions] = useState<Session[]>(loadSessions)
+  const [sessions, setSessions] = useState<Session[]>([])
   const [activeSession, setActiveSession] = useState<Session | null>(null)
+  const [isLoadingSessions, setIsLoadingSessions] = useState(true)
+  const [apiError, setApiError] = useState('')
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null)
-  const [transcriptionStatus, setTranscriptionStatus] = useState<'off' | 'starting' | 'on' | 'error'>('off')
+  const transcriptRef = useRef('')
+  const [transcriptionStatus, setTranscriptionStatus] = useState<
+    'off' | 'starting' | 'on' | 'error'
+  >('off')
   const [transcriptionError, setTranscriptionError] = useState('')
   const [interimTranscript, setInterimTranscript] = useState('')
 
@@ -81,21 +118,49 @@ function App() {
   }, [])
 
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(sessions))
-    } catch (error) {
-      console.error('Could not save Sidekick sessions:', error)
+    let cancelled = false
+
+    async function fetchSessions() {
+      try {
+        setApiError('')
+        const meetings = await apiRequest<ApiMeeting[]>('/api/meetings')
+
+        if (!cancelled) {
+          setSessions(meetings.map(toSession))
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setApiError(
+            error instanceof Error
+              ? error.message
+              : 'Could not load your meetings.',
+          )
+        }
+      } finally {
+        if (!cancelled) {
+          setIsLoadingSessions(false)
+        }
+      }
     }
-  }, [sessions])
+
+    void fetchSessions()
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   function startTranscription() {
     if (!activeSession) return
 
+    transcriptRef.current = activeSession.transcript ?? ''
     setTranscriptionError('')
     setInterimTranscript('')
 
     const speechWindow = window as SpeechRecognitionWindow
-    const Recognition = speechWindow.SpeechRecognition ?? speechWindow.webkitSpeechRecognition
+    const Recognition =
+      speechWindow.SpeechRecognition ??
+      speechWindow.webkitSpeechRecognition
 
     if (!Recognition) {
       setTranscriptionStatus('error')
@@ -115,7 +180,11 @@ function App() {
         let finalText = ''
         let interimText = ''
 
-        for (let index = event.resultIndex; index < event.results.length; index += 1) {
+        for (
+          let index = event.resultIndex;
+          index < event.results.length;
+          index += 1
+        ) {
           const result = event.results[index]
           if (!result?.[0]?.transcript) continue
 
@@ -128,6 +197,10 @@ function App() {
 
         if (finalText.trim()) {
           const addition = finalText.trim()
+          transcriptRef.current = transcriptRef.current
+            ? `${transcriptRef.current} ${addition}`
+            : addition
+
           const entry = {
             id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
             time: new Date().toLocaleTimeString([], {
@@ -138,24 +211,85 @@ function App() {
             text: addition,
           }
 
+          void apiRequest<ApiTranscriptSegment>(
+            `/api/meetings/${activeSession.id}/segments`,
+            {
+              method: 'POST',
+              body: JSON.stringify({
+                time: entry.time,
+                text: entry.text,
+              }),
+            },
+          ).then((savedSegment) => {
+            const savedEntry = {
+              id: String(savedSegment.id),
+              time: savedSegment.time,
+              text: savedSegment.text,
+            }
+
+            setSessions((current) =>
+              current.map((session) =>
+                session.id === activeSession.id
+                  ? {
+                      ...session,
+                      transcriptEntries: (session.transcriptEntries ?? []).map(
+                        (item) => item.id === entry.id ? savedEntry : item,
+                      ),
+                    }
+                  : session,
+              ),
+            )
+
+            setActiveSession((current) => {
+              if (!current || current.id !== activeSession.id) return current
+
+              return {
+                ...current,
+                transcriptEntries: (current.transcriptEntries ?? []).map(
+                  (item) => item.id === entry.id ? savedEntry : item,
+                ),
+              }
+            })
+          }).catch((error) => {
+            console.error('Could not save transcript segment:', error)
+            setApiError('Transcript segment could not be saved to the database.')
+          })
+
           setSessions((current) =>
             current.map((session) => {
               if (session.id !== activeSession.id) return session
+
               const existing = session.transcript?.trim() ?? ''
+
               return {
                 ...session,
-                transcript: existing ? `${existing} ${addition}` : addition,
-                transcriptEntries: [...(session.transcriptEntries ?? []), entry],
+                transcript: existing
+                  ? `${existing} ${addition}`
+                  : addition,
+                transcriptEntries: [
+                  ...(session.transcriptEntries ?? []),
+                  entry,
+                ],
               }
             }),
           )
+
           setActiveSession((current) => {
-            if (!current || current.id !== activeSession.id) return current
+            if (!current || current.id !== activeSession.id) {
+              return current
+            }
+
             const existing = current.transcript?.trim() ?? ''
+
             return {
               ...current,
-              transcript: existing ? `${existing} ${addition}` : addition,
-              transcriptEntries: [...(current.transcriptEntries ?? []), entry],
+              transcript: existing
+                ? `${existing} ${addition}`
+                : addition,
+              transcriptEntries: [
+                ...(current.transcriptEntries ?? []),
+                entry,
+              ],
             }
           })
         }
@@ -165,20 +299,33 @@ function App() {
 
       recognition.onerror = (event) => {
         setTranscriptionStatus('error')
-        if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
-          setTranscriptionError('Microphone or speech recognition permission was denied. Check your browser permissions and try again.')
+
+        if (
+          event.error === 'not-allowed' ||
+          event.error === 'service-not-allowed'
+        ) {
+          setTranscriptionError(
+            'Microphone or speech recognition permission was denied. Check your browser permissions and try again.',
+          )
         } else if (event.error === 'no-speech') {
-          setTranscriptionError('No speech was detected. Try speaking closer to your microphone.')
+          setTranscriptionError(
+            'No speech was detected. Try speaking closer to your microphone.',
+          )
         } else {
-          setTranscriptionError(`Speech recognition stopped: ${event.error}. You can try starting it again.`)
+          setTranscriptionError(
+            `Speech recognition stopped: ${event.error}. You can try starting it again.`,
+          )
         }
+
         recognitionRef.current = null
       }
 
       recognition.onend = () => {
         if (recognitionRef.current === recognition) {
           recognitionRef.current = null
-          setTranscriptionStatus((status) => status === 'on' ? 'off' : status)
+          setTranscriptionStatus((status) =>
+            status === 'on' ? 'off' : status,
+          )
         }
       }
 
@@ -189,7 +336,9 @@ function App() {
     } catch {
       recognitionRef.current = null
       setTranscriptionStatus('error')
-      setTranscriptionError('Could not start speech recognition. Check your browser permissions and try again.')
+      setTranscriptionError(
+        'Could not start speech recognition. Check your browser permissions and try again.',
+      )
     }
   }
 
@@ -201,50 +350,94 @@ function App() {
     setTranscriptionError('')
   }
 
-  function createSession(event: React.FormEvent<HTMLFormElement>) {
+  async function createSession(
+    event: React.FormEvent<HTMLFormElement>,
+  ) {
     event.preventDefault()
 
     const title = meetingTitle.trim()
     if (!title) return
 
-    const session: Session = {
-      id: Date.now(),
-      title,
-      createdAt: new Date().toLocaleString([], {
-        month: 'short',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-      }),
-      notes: '',
-    }
+    try {
+      setApiError('')
 
-    setSessions((current) => [session, ...current])
-    setActiveSession(session)
-    setMeetingTitle('')
-    setShowSetup(false)
-    setPage('sessions')
+      const meeting = await apiRequest<ApiMeeting>('/api/meetings', {
+        method: 'POST',
+        body: JSON.stringify({
+          title,
+          transcript: '',
+          notes: '',
+        }),
+      })
+
+      const session = toSession(meeting)
+
+      setSessions((current) => [session, ...current])
+      setActiveSession(session)
+      setMeetingTitle('')
+      setShowSetup(false)
+      setPage('sessions')
+    } catch (error) {
+      setApiError(
+        error instanceof Error
+          ? error.message
+          : 'Could not create the meeting. Please try again.',
+      )
+    }
   }
 
-  function deleteSession(id: number) {
-    if (activeSession?.id === id) stopTranscription()
-    setSessions((current) => current.filter((session) => session.id !== id))
+  async function deleteSession(id: number) {
+    try {
+      setApiError('')
 
-    if (activeSession?.id === id) {
-      setActiveSession(null)
+      await apiRequest<void>(`/api/meetings/${id}`, {
+        method: 'DELETE',
+      })
+
+      if (activeSession?.id === id) {
+        stopTranscription()
+        setActiveSession(null)
+      }
+
+      setSessions((current) =>
+        current.filter((session) => session.id !== id),
+      )
+    } catch (error) {
+      setApiError(
+        error instanceof Error
+          ? error.message
+          : 'Could not delete the meeting. Please try again.',
+      )
     }
   }
 
-  function updateNotes(notes: string) {
+  async function updateNotes(notes: string) {
     if (!activeSession) return
 
+    const sessionId = activeSession.id
     const updatedSession = { ...activeSession, notes }
+
     setActiveSession(updatedSession)
     setSessions((current) =>
       current.map((session) =>
-        session.id === updatedSession.id ? updatedSession : session,
+        session.id === sessionId ? updatedSession : session,
       ),
     )
+
+    try {
+      setApiError('')
+
+      await apiRequest<ApiMeeting>(`/api/meetings/${sessionId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ notes }),
+      })
+    } catch (error) {
+      setApiError(
+        error instanceof Error
+          ? error.message
+          : 'Could not save your notes.',
+      )
+    }
   }
 
   function openPage(nextPage: Page) {
@@ -253,10 +446,42 @@ function App() {
     setActiveSession(null)
   }
 
-  function openSession(session: Session) {
-    if (activeSession?.id !== session.id) stopTranscription()
+  async function openSession(session: Session) {
+    if (activeSession?.id !== session.id) {
+      stopTranscription()
+    }
+
     setActiveSession(session)
     setPage('sessions')
+    setApiError('')
+
+    try {
+      const segments = await apiRequest<ApiTranscriptSegment[]>(
+        `/api/meetings/${session.id}/segments`,
+      )
+      const transcriptEntries = segments.map((segment) => ({
+        id: String(segment.id),
+        time: segment.time,
+        text: segment.text,
+      }))
+
+      setSessions((current) =>
+        current.map((item) =>
+          item.id === session.id ? { ...item, transcriptEntries } : item,
+        ),
+      )
+      setActiveSession((current) =>
+        current?.id === session.id
+          ? { ...current, transcriptEntries }
+          : current,
+      )
+    } catch (error) {
+      setApiError(
+        error instanceof Error
+          ? error.message
+          : 'Could not load the saved transcript segments.',
+      )
+    }
   }
 
   return (
@@ -290,8 +515,7 @@ function App() {
           >
             <span aria-hidden="true">↗</span>
             Your takeaways
-          </button>
-        </nav>
+          </button>        </nav>
 
         <div className="rail-bottom">
           <span className="avatar">s</span>
@@ -322,6 +546,18 @@ function App() {
         </header>
 
         <div className="content">
+          {apiError && (
+            <p className="microphone-error" role="alert">
+              {apiError}
+            </p>
+          )}
+
+          {isLoadingSessions && (
+            <p className="microphone-disclaimer" role="status">
+              Loading your sessions…
+            </p>
+          )}
+
           {page === 'home' && !activeSession && (
             <>
               <section className="intro">
@@ -340,7 +576,9 @@ function App() {
               <section className="session">
                 <div className="session-top">
                   <div>
-                    <span className="session-index">01 / YOUR NEXT SESSION</span>
+                    <span className="session-index">
+                      01 / YOUR NEXT SESSION
+                    </span>
                     <h2>Pull up a chair.</h2>
                   </div>
 
@@ -369,7 +607,9 @@ function App() {
 
                 <div className="session-bottom">
                   <div className="session-caption">
-                    <span className="mic-symbol" aria-hidden="true">◉</span>
+                    <span className="mic-symbol" aria-hidden="true">
+                      ◉
+                    </span>
                     <div>
                       <strong>A little more present.</strong>
                       <span>Start with a name. The rest can follow.</span>
@@ -429,7 +669,9 @@ function App() {
 
                   <div className="meeting-room-heading">
                     <div>
-                      <span className="session-index">YOUR MEETING SPACE</span>
+                      <span className="session-index">
+                        YOUR MEETING SPACE
+                      </span>
                       <h1>{activeSession.title}</h1>
                       <p className="session-date">
                         Created {activeSession.createdAt}
@@ -455,30 +697,52 @@ function App() {
                     <section className="meeting-panel conversation-panel">
                       <div className="panel-heading">
                         <div>
-                          <span className="panel-overline">01 / THE ROOM</span>
+                          <span className="panel-overline">
+                            01 / THE ROOM
+                          </span>
                           <h2>Conversation</h2>
                         </div>
-                        <span className="panel-icon" aria-hidden="true">◌</span>
+                        <span className="panel-icon" aria-hidden="true">
+                          ◌
+                        </span>
                       </div>
 
-                      <div className="transcript-content" aria-live="polite" aria-relevant="additions text">
+                      <div
+                        className="transcript-content"
+                        aria-live="polite"
+                        aria-relevant="additions text"
+                      >
                         {activeSession.transcriptEntries?.length ? (
                           <div className="transcript-entry-list">
                             {activeSession.transcriptEntries.map((entry) => (
-                              <article className="transcript-entry" key={entry.id}>
-                                <time className="transcript-time">{entry.time}</time>
-                                <p className="transcript-entry-text">{entry.text}</p>
+                              <article
+                                className="transcript-entry"
+                                key={entry.id}
+                              >
+                                <time className="transcript-time">
+                                  {entry.time}
+                                </time>
+                                <p className="transcript-entry-text">
+                                  {entry.text}
+                                </p>
                               </article>
                             ))}
                           </div>
                         ) : activeSession.transcript ? (
                           <article className="transcript-entry transcript-legacy-entry">
-                            <span className="transcript-time">Earlier transcript</span>
-                            <p className="transcript-entry-text">{activeSession.transcript}</p>
+                            <span className="transcript-time">
+                              Earlier transcript
+                            </span>
+                            <p className="transcript-entry-text">
+                              {activeSession.transcript}
+                            </p>
                           </article>
                         ) : (
                           <div className="conversation-empty">
-                            <div className="conversation-mark" aria-hidden="true">
+                            <div
+                              className="conversation-mark"
+                              aria-hidden="true"
+                            >
                               <span />
                               <span />
                               <span />
@@ -487,21 +751,38 @@ function App() {
                             </div>
                             <h3>Your words, as they happen.</h3>
                             <p>
-                              Start live transcription and recognized speech will appear here, with a timestamp for each captured segment.
+                              Start live transcription and recognized speech
+                              will appear here, with a timestamp for each
+                              captured segment.
                             </p>
                           </div>
                         )}
+
                         {interimTranscript && (
                           <article className="transcript-entry transcript-entry-pending">
-                            <span className="transcript-time">Listening now</span>
-                            <p className="transcript-interim">{interimTranscript}</p>
+                            <span className="transcript-time">
+                              Listening now
+                            </span>
+                            <p className="transcript-interim">
+                              {interimTranscript}
+                            </p>
                           </article>
                         )}
                       </div>
 
                       <div className="microphone-setup">
                         <div className="microphone-status-line">
-                          <span className={`microphone-status-dot ${transcriptionStatus === 'on' ? 'on' : transcriptionStatus === 'error' ? 'error' : transcriptionStatus === 'starting' ? 'requesting' : ''}`} />
+                          <span
+                            className={`microphone-status-dot ${
+                              transcriptionStatus === 'on'
+                                ? 'on'
+                                : transcriptionStatus === 'error'
+                                  ? 'error'
+                                  : transcriptionStatus === 'starting'
+                                    ? 'requesting'
+                                    : ''
+                            }`}
+                          />
                           <span>
                             {transcriptionStatus === 'on'
                               ? 'Live transcription is on'
@@ -514,53 +795,88 @@ function App() {
                         </div>
 
                         {transcriptionError && (
-                          <p className="microphone-error" role="alert">{transcriptionError}</p>
+                          <p className="microphone-error" role="alert">
+                            {transcriptionError}
+                          </p>
                         )}
 
                         {transcriptionStatus === 'on' ? (
-                          <button className="microphone-button microphone-stop" onClick={stopTranscription}>
-                            <span aria-hidden="true">■</span> Stop transcription
+                          <button
+                            className="microphone-button microphone-stop"
+                            onClick={stopTranscription}
+                          >
+                            <span aria-hidden="true">■</span> Stop
+                            transcription
                           </button>
                         ) : (
-                          <button className="microphone-button" onClick={startTranscription} disabled={transcriptionStatus === 'starting'}>
+                          <button
+                            className="microphone-button"
+                            onClick={startTranscription}
+                            disabled={transcriptionStatus === 'starting'}
+                          >
                             <span aria-hidden="true">◉</span>
-                            {transcriptionStatus === 'starting' ? 'Starting…' : 'Start live transcription'}
+                            {transcriptionStatus === 'starting'
+                              ? 'Starting…'
+                              : 'Start live transcription'}
                           </button>
                         )}
 
                         <p className="microphone-disclaimer">
-                          Uses your browser’s speech recognition. Support and processing vary by browser; speech may be sent to the browser provider’s service.
+                          Uses your browser’s speech recognition. Support and
+                          processing vary by browser; speech may be sent to the
+                          browser provider’s service.
                         </p>
                       </div>
 
                       <div className="panel-footer">
-                        <span>Transcript · {activeSession.transcriptEntries?.length ?? (activeSession.transcript ? 1 : 0)} segments</span>
-                        <span>{transcriptionStatus === 'on' ? 'Listening for speech' : 'Saved to this session'}</span>
+                        <span>
+                          Transcript ·{' '}
+                          {activeSession.transcriptEntries?.length ??
+                            (activeSession.transcript ? 1 : 0)}{' '}
+                          segments
+                        </span>
+                        <span>
+                          {transcriptionStatus === 'on'
+                            ? 'Listening for speech'
+                            : 'Saved to this session'}
+                        </span>
                       </div>
                     </section>
 
                     <section className="meeting-panel notes-panel">
                       <div className="panel-heading">
                         <div>
-                          <span className="panel-overline">02 / KEEP CLOSE</span>
+                          <span className="panel-overline">
+                            02 / KEEP CLOSE
+                          </span>
                           <h2>Your notes</h2>
                         </div>
-                        <span className="panel-icon" aria-hidden="true">✳</span>
+                        <span className="panel-icon" aria-hidden="true">
+                          ✳
+                        </span>
                       </div>
 
                       <p className="notes-intro">
                         Catch a thought before it slips away.
                       </p>
 
-                      <label className="notes-label" htmlFor="meeting-notes">
+                      <label
+                        className="notes-label"
+                        htmlFor="meeting-notes"
+                      >
                         PERSONAL MEETING NOTES
                       </label>
+
                       <textarea
                         id="meeting-notes"
                         className="meeting-notes-input"
                         value={activeSession.notes ?? ''}
-                        onChange={(event) => updateNotes(event.target.value)}
-                        placeholder={'• Things to follow up on...\n\n• Questions to ask...\n\n• Ideas worth keeping...'}
+                        onChange={(event) =>
+                          updateNotes(event.target.value)
+                        }
+                        placeholder={
+                          '• Things to follow up on...\n\n• Questions to ask...\n\n• Ideas worth keeping...'
+                        }
                       />
 
                       <div className="panel-footer notes-footer">
@@ -572,7 +888,9 @@ function App() {
                 </div>
               ) : (
                 <>
-                  <p className="kicker">YOUR MEETINGS, IN ONE PLACE</p>
+                  <p className="kicker">
+                    YOUR MEETINGS, IN ONE PLACE
+                  </p>
 
                   <div className="subpage-heading">
                     <div>
@@ -600,7 +918,8 @@ function App() {
                         className="start-session"
                         onClick={() => setShowSetup(true)}
                       >
-                        Create your first session <span aria-hidden="true">↗</span>
+                        Create your first session{' '}
+                        <span aria-hidden="true">↗</span>
                       </button>
                     </div>
                   ) : (
@@ -663,7 +982,9 @@ function App() {
         <div
           className="modal-backdrop"
           onMouseDown={(event) => {
-            if (event.target === event.currentTarget) setShowSetup(false)
+            if (event.target === event.currentTarget) {
+              setShowSetup(false)
+            }
           }}
         >
           <section
