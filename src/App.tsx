@@ -153,6 +153,7 @@ function App() {
   >('off')
   const [transcriptionError, setTranscriptionError] = useState('')
   const [interimTranscript, setInterimTranscript] = useState('')
+  const [transcriptSearch, setTranscriptSearch] = useState('')
 
   useEffect(() => {
     return () => {
@@ -542,6 +543,15 @@ function App() {
     }
   }
 
+  const transcriptEntries = activeSession?.transcriptEntries ?? []
+  const searchQuery = transcriptSearch.trim().toLowerCase()
+
+  const visibleTranscriptEntries = searchQuery
+    ? transcriptEntries.filter((entry) =>
+        entry.text.toLowerCase().includes(searchQuery),
+      )
+    : transcriptEntries
+
   return (
     <div className="sidekick">
       <aside className="rail">
@@ -766,12 +776,54 @@ function App() {
                         </span>
                       </div>
 
+                      <label
+                        className="notes-label"
+                        htmlFor="transcript-search"
+                      >
+                        SEARCH TRANSCRIPT
+                      </label>
+
+                      <input
+                        id="transcript-search"
+                        className="meeting-notes-input"
+                        type="search"
+                        value={transcriptSearch}
+                        onChange={(event) =>
+                          setTranscriptSearch(event.target.value)
+                        }
+                        placeholder="Find a word or phrase..."
+                        aria-label="Search transcript"
+                      />
+
                       <div
                         className="transcript-content"
                         aria-live="polite"
                         aria-relevant="additions text"
                       >
-                        {activeSession.transcriptEntries?.length ? (
+                        {searchQuery ? (
+                          visibleTranscriptEntries.length > 0 ? (
+                            <div className="transcript-entry-list">
+                              {visibleTranscriptEntries.map((entry) => (
+                                <article
+                                  className="transcript-entry"
+                                  key={entry.id}
+                                >
+                                  <time className="transcript-time">
+                                    {entry.time}
+                                  </time>
+                                  <p className="transcript-entry-text">
+                                    {entry.text}
+                                  </p>
+                                </article>
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="conversation-empty">
+                              <h3>No matching transcript segments.</h3>
+                              <p>Try another word or clear your search.</p>
+                            </div>
+                          )
+                        ) : activeSession.transcriptEntries?.length ? (
                           <div className="transcript-entry-list">
                             {activeSession.transcriptEntries.map((entry) => (
                               <article
