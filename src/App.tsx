@@ -1,4 +1,5 @@
-﻿import { useEffect, useRef, useState } from 'react'
+﻿
+import { useEffect, useRef, useState } from 'react'
 import './App.css'
 
 type Session = {
@@ -75,16 +76,58 @@ async function apiRequest<T>(
   path: string,
   options: RequestInit = {},
 ): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  })
+  let response: Response
+
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`, {
+      ...options,
+      headers: {
+        'Content-Type': 'application/json',
+        ...options.headers,
+      },
+    })
+  } catch {
+    throw new Error(
+      'Could not connect to the Sidekick API. Make sure the backend is running.',
+    )
+  }
 
   if (!response.ok) {
-    throw new Error(`API request failed (${response.status})`)
+    let message = ''
+
+    try {
+      const errorBody: unknown = await response.json()
+
+      if (
+        errorBody &&
+        typeof errorBody === 'object' &&
+        'detail' in errorBody &&
+        typeof errorBody.detail === 'string' &&
+        errorBody.detail.trim()
+      ) {
+        message = errorBody.detail
+      } else if (
+        errorBody &&
+        typeof errorBody === 'object' &&
+        'message' in errorBody &&
+        typeof errorBody.message === 'string' &&
+        errorBody.message.trim()
+      ) {
+        message = errorBody.message
+      }
+    } catch {
+      // The server did not return a readable JSON error body.
+    }
+
+    if (!message && response.status === 404) {
+      message = 'The requested resource could not be found (404).'
+    } else if (!message && response.status >= 500) {
+      message = 'The server encountered a problem. Please try again.'
+    } else if (!message) {
+      message = `The request failed (${response.status}).`
+    }
+
+    throw new Error(message)
   }
 
   if (response.status === 204) {
@@ -530,7 +573,8 @@ function App() {
           >
             <span aria-hidden="true">↗</span>
             Your takeaways
-          </button>        </nav>
+          </button>
+        </nav>
 
         <div className="rail-bottom">
           <span className="avatar">s</span>
@@ -539,7 +583,9 @@ function App() {
             <span>Here for the details</span>
           </div>
         </div>
-      </aside>      <main className="page">
+      </aside>
+
+      <main className="page">
         <header className="topline">
           <a
             className="header-wordmark"
