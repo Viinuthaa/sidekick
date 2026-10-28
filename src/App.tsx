@@ -1,5 +1,4 @@
-﻿
-import { useEffect, useRef, useState } from 'react'
+﻿import { useEffect, useRef, useState } from 'react'
 import './App.css'
 
 type Session = {
@@ -268,40 +267,48 @@ function App() {
                 text: entry.text,
               }),
             },
-          ).then((savedSegment) => {
-            const savedEntry = {
-              id: String(savedSegment.id),
-              time: savedSegment.time,
-              text: savedSegment.text,
-            }
-
-            setSessions((current) =>
-              current.map((session) =>
-                session.id === activeSession.id
-                  ? {
-                      ...session,
-                      transcriptEntries: (session.transcriptEntries ?? []).map(
-                        (item) => item.id === entry.id ? savedEntry : item,
-                      ),
-                    }
-                  : session,
-              ),
-            )
-
-            setActiveSession((current) => {
-              if (!current || current.id !== activeSession.id) return current
-
-              return {
-                ...current,
-                transcriptEntries: (current.transcriptEntries ?? []).map(
-                  (item) => item.id === entry.id ? savedEntry : item,
-                ),
+          )
+            .then((savedSegment) => {
+              const savedEntry = {
+                id: String(savedSegment.id),
+                time: savedSegment.time,
+                text: savedSegment.text,
               }
+
+              setSessions((current) =>
+                current.map((session) =>
+                  session.id === activeSession.id
+                    ? {
+                        ...session,
+                        transcriptEntries: (
+                          session.transcriptEntries ?? []
+                        ).map((item) =>
+                          item.id === entry.id ? savedEntry : item,
+                        ),
+                      }
+                    : session,
+                ),
+              )
+
+              setActiveSession((current) => {
+                if (!current || current.id !== activeSession.id) return current
+
+                return {
+                  ...current,
+                  transcriptEntries: (
+                    current.transcriptEntries ?? []
+                  ).map((item) =>
+                    item.id === entry.id ? savedEntry : item,
+                  ),
+                }
+              })
             })
-          }).catch((error) => {
-            console.error('Could not save transcript segment:', error)
-            setApiError('Transcript segment could not be saved to the database.')
-          })
+            .catch((error) => {
+              console.error('Could not save transcript segment:', error)
+              setApiError(
+                'Transcript segment could not be saved to the database.',
+              )
+            })
 
           setSessions((current) =>
             current.map((session) => {
@@ -552,6 +559,45 @@ function App() {
       )
     : transcriptEntries
 
+  function exportTranscript() {
+    if (!activeSession) return
+
+    const entries = activeSession.transcriptEntries ?? []
+    const transcriptText = entries.length
+      ? entries
+          .map((entry) => `[${entry.time}] ${entry.text}`)
+          .join('\n')
+      : activeSession.transcript?.trim() || 'No transcript available.'
+
+    const exportContent = [
+      `Meeting: ${activeSession.title}`,
+      `Created: ${activeSession.createdAt}`,
+      `Exported: ${new Date().toLocaleString()}`,
+      '',
+      'TRANSCRIPT',
+      '----------',
+      transcriptText,
+    ].join('\n')
+
+    const blob = new Blob([exportContent], {
+      type: 'text/plain;charset=utf-8',
+    })
+    const downloadUrl = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+
+    const safeTitle =
+      activeSession.title.replace(/[<>:"/\\|?*\x00-\x1F]/g, '-').trim() ||
+      'meeting'
+
+    link.href = downloadUrl
+    link.download = `${safeTitle}-transcript.txt`
+
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(downloadUrl)
+  }
+
   return (
     <div className="sidekick">
       <aside className="rail">
@@ -771,9 +817,18 @@ function App() {
                           </span>
                           <h2>Conversation</h2>
                         </div>
-                        <span className="panel-icon" aria-hidden="true">
-                          ◌
-                        </span>
+                        <div>
+                          <button
+                            type="button"
+                            className="delete-session"
+                            onClick={exportTranscript}
+                          >
+                            Export transcript
+                          </button>
+                          <span className="panel-icon" aria-hidden="true">
+                            ◌
+                          </span>
+                        </div>
                       </div>
 
                       <label
@@ -787,6 +842,11 @@ function App() {
                         id="transcript-search"
                         className="meeting-notes-input"
                         type="search"
+                        style={{
+                          height: '42px',
+                          minHeight: '42px',
+                          padding: '0 14px',
+                        }}
                         value={transcriptSearch}
                         onChange={(event) =>
                           setTranscriptSearch(event.target.value)
@@ -879,9 +939,7 @@ function App() {
                             </p>
                           </article>
                         )}
-                      </div>
-
-                      <div className="microphone-setup">
+                      </div>                      <div className="microphone-setup">
                         <div className="microphone-status-line">
                           <span
                             className={`microphone-status-dot ${
