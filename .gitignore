@@ -48,3 +48,6 @@ backend/*.db
 
 # Local backup files
 src/App.backend-backup.tsx
+
+# API secrets
+backend/.env
