@@ -55,6 +55,15 @@ type ApiTranscriptSegment = {
   text: string
 }
 
+type MeetingSummary = {
+  meeting_id: number
+  meeting_title: string
+  summary: string
+  key_points: string[]
+  decisions: string[]
+  action_items: string[]
+}
+
 function toSession(meeting: ApiMeeting): Session {
   return {
     id: meeting.id,
@@ -139,25 +148,36 @@ async function apiRequest<T>(
 function App() {
   const [page, setPage] = useState<Page>('home')
   const [showSetup, setShowSetup] = useState(false)
-  const [meetingTitle, setMeetingTitle] = useState('')
+  const [, setMeetingTitle] = useState('')
   const [sessions, setSessions] = useState<Session[]>([])
   const [activeSession, setActiveSession] = useState<Session | null>(null)
   const [isLoadingSessions, setIsLoadingSessions] = useState(true)
   const [apiError, setApiError] = useState('')
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null)
   const transcriptRef = useRef('')
-  const notesSaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const notesSaveTimeoutRef =
+    useRef<ReturnType<typeof setTimeout> | null>(null)
+
   const [transcriptionStatus, setTranscriptionStatus] = useState<
     'off' | 'starting' | 'on' | 'error'
   >('off')
   const [transcriptionError, setTranscriptionError] = useState('')
-  const [interimTranscript, setInterimTranscript] = useState('')
+  const [, setInterimTranscript] = useState('')
   const [transcriptSearch, setTranscriptSearch] = useState('')
+
+  const [meetingSummary, setMeetingSummary] =
+    useState<MeetingSummary | null>(null)
+  const [isGeneratingSummary, setIsGeneratingSummary] = useState(false)
+  const [summaryError, setSummaryError] = useState('')
+  const [summaryMeetingId, setSummaryMeetingId] = useState<number | null>(
+    null,
+  )
 
   useEffect(() => {
     return () => {
       recognitionRef.current?.stop()
       recognitionRef.current = null
+
       if (notesSaveTimeoutRef.current) {
         clearTimeout(notesSaveTimeoutRef.current)
       }
@@ -291,7 +311,12 @@ function App() {
               )
 
               setActiveSession((current) => {
-                if (!current || current.id !== activeSession.id) return current
+                if (
+                  !current ||
+                  current.id !== activeSession.id
+                ) {
+                  return current
+                }
 
                 return {
                   ...current,
@@ -330,7 +355,10 @@ function App() {
           )
 
           setActiveSession((current) => {
-            if (!current || current.id !== activeSession.id) {
+            if (
+              !current ||
+              current.id !== activeSession.id
+            ) {
               return current
             }
 
@@ -405,13 +433,9 @@ function App() {
     setTranscriptionError('')
   }
 
-  async function createSession(
-    event: React.FormEvent<HTMLFormElement>,
-  ) {
-    event.preventDefault()
-
-    const title = meetingTitle.trim()
-    if (!title) return
+  async function createSession(title: string): Promise<Session | null> {
+    const trimmedTitle = title.trim()
+    if (!trimmedTitle) return null
 
     try {
       setApiError('')
@@ -419,7 +443,7 @@ function App() {
       const meeting = await apiRequest<ApiMeeting>('/api/meetings', {
         method: 'POST',
         body: JSON.stringify({
-          title,
+          title: trimmedTitle,
           transcript: '',
           notes: '',
         }),
@@ -431,13 +455,15 @@ function App() {
       setActiveSession(session)
       setMeetingTitle('')
       setShowSetup(false)
-      setPage('sessions')
+      setPage('home')
+      return session
     } catch (error) {
       setApiError(
         error instanceof Error
           ? error.message
           : 'Could not create the meeting. Please try again.',
       )
+      return null
     }
   }
 
@@ -518,13 +544,14 @@ function App() {
     }
 
     setActiveSession(session)
-    setPage('sessions')
+    setPage('home')
     setApiError('')
 
     try {
       const segments = await apiRequest<ApiTranscriptSegment[]>(
         `/api/meetings/${session.id}/segments`,
       )
+
       const transcriptEntries = segments.map((segment) => ({
         id: String(segment.id),
         time: segment.time,
@@ -536,6 +563,7 @@ function App() {
           item.id === session.id ? { ...item, transcriptEntries } : item,
         ),
       )
+
       setActiveSession((current) =>
         current?.id === session.id
           ? { ...current, transcriptEntries }
@@ -559,43 +587,32 @@ function App() {
       )
     : transcriptEntries
 
-  function exportTranscript() {
-    if (!activeSession) return
+  const isRecording =
+    transcriptionStatus === 'on' || transcriptionStatus === 'starting'
+  const microphoneError = transcriptionError
 
-    const entries = activeSession.transcriptEntries ?? []
-    const transcriptText = entries.length
-      ? entries
-          .map((entry) => `[${entry.time}] ${entry.text}`)
-          .join('\n')
-      : activeSession.transcript?.trim() || 'No transcript available.'
+  async function generateMeetingSummary(session: Session) {
+    setIsGeneratingSummary(true)
+    setSummaryError('')
+    setMeetingSummary(null)
+    setSummaryMeetingId(session.id)
 
-    const exportContent = [
-      `Meeting: ${activeSession.title}`,
-      `Created: ${activeSession.createdAt}`,
-      `Exported: ${new Date().toLocaleString()}`,
-      '',
-      'TRANSCRIPT',
-      '----------',
-      transcriptText,
-    ].join('\n')
+    try {
+      const result = await apiRequest<MeetingSummary>(
+        `/api/meetings/${session.id}/summary`,
+        { method: 'POST' },
+      )
 
-    const blob = new Blob([exportContent], {
-      type: 'text/plain;charset=utf-8',
-    })
-    const downloadUrl = URL.createObjectURL(blob)
-    const link = document.createElement('a')
-
-    const safeTitle =
-      activeSession.title.replace(/[<>:"/\\|?*\x00-\x1F]/g, '-').trim() ||
-      'meeting'
-
-    link.href = downloadUrl
-    link.download = `${safeTitle}-transcript.txt`
-
-    document.body.appendChild(link)
-    link.click()
-    link.remove()
-    URL.revokeObjectURL(downloadUrl)
+      setMeetingSummary(result)
+    } catch (error) {
+      setSummaryError(
+        error instanceof Error
+          ? error.message
+          : 'Could not generate the meeting summary.',
+      )
+    } finally {
+      setIsGeneratingSummary(false)
+    }
   }
 
   return (
@@ -768,358 +785,196 @@ function App() {
             </>
           )}
 
-          {page === 'sessions' && (
-            <section className="subpage">
-              {activeSession ? (
-                <div className="meeting-room">
-                  <button
-                    className="back-link"
-                    onClick={() => {
-                      stopTranscription()
-                      setActiveSession(null)
-                    }}
-                  >
-                    ← All sessions
-                  </button>
-
-                  <div className="meeting-room-heading">
+          {page === 'home' && activeSession && (
+            <section className="meeting-room">
+              <div className="meeting-room-grid">
+                <div className="meeting-panel">
+                  <div className="panel-heading">
                     <div>
-                      <span className="session-index">
-                        YOUR MEETING SPACE
-                      </span>
-                      <h1>{activeSession.title}</h1>
-                      <p className="session-date">
-                        Created {activeSession.createdAt}
-                      </p>
+                      <span className="panel-overline">YOUR SESSION</span>
+                      <h2>{activeSession.title}</h2>
                     </div>
-
-                    <button
-                      className="delete-session"
-                      onClick={() => deleteSession(activeSession.id)}
-                    >
-                      Delete session
-                    </button>
+                    <span className="panel-icon" aria-hidden="true">
+                      ◉
+                    </span>
                   </div>
 
-                  <div className="meeting-status">
-                    <span className="meeting-status-dot" />
-                    <span>SESSION WORKSPACE</span>
-                    <span className="meeting-status-divider">/</span>
-                    <span>NOT RECORDING</span>
-                  </div>
-
-                  <div className="meeting-room-grid">
-                    <section className="meeting-panel conversation-panel">
-                      <div className="panel-heading">
-                        <div>
-                          <span className="panel-overline">
-                            01 / THE ROOM
-                          </span>
-                          <h2>Conversation</h2>
-                        </div>
-                        <div>
-                          <button
-                            type="button"
-                            className="delete-session"
-                            onClick={exportTranscript}
-                          >
-                            Export transcript
-                          </button>
-                          <span className="panel-icon" aria-hidden="true">
-                            ◌
-                          </span>
-                        </div>
-                      </div>
-
-                      <label
-                        className="notes-label"
-                        htmlFor="transcript-search"
-                      >
-                        SEARCH TRANSCRIPT
-                      </label>
-
-                      <input
-                        id="transcript-search"
-                        className="meeting-notes-input"
-                        type="search"
-                        style={{
-                          height: '42px',
-                          minHeight: '42px',
-                          padding: '0 14px',
-                        }}
-                        value={transcriptSearch}
-                        onChange={(event) =>
-                          setTranscriptSearch(event.target.value)
-                        }
-                        placeholder="Find a word or phrase..."
-                        aria-label="Search transcript"
-                      />
-
-                      <div
-                        className="transcript-content"
-                        aria-live="polite"
-                        aria-relevant="additions text"
-                      >
-                        {searchQuery ? (
-                          visibleTranscriptEntries.length > 0 ? (
-                            <div className="transcript-entry-list">
-                              {visibleTranscriptEntries.map((entry) => (
-                                <article
-                                  className="transcript-entry"
-                                  key={entry.id}
-                                >
-                                  <time className="transcript-time">
-                                    {entry.time}
-                                  </time>
-                                  <p className="transcript-entry-text">
-                                    {entry.text}
-                                  </p>
-                                </article>
-                              ))}
-                            </div>
-                          ) : (
-                            <div className="conversation-empty">
-                              <h3>No matching transcript segments.</h3>
-                              <p>Try another word or clear your search.</p>
-                            </div>
-                          )
-                        ) : activeSession.transcriptEntries?.length ? (
-                          <div className="transcript-entry-list">
-                            {activeSession.transcriptEntries.map((entry) => (
-                              <article
-                                className="transcript-entry"
-                                key={entry.id}
-                              >
-                                <time className="transcript-time">
-                                  {entry.time}
-                                </time>
-                                <p className="transcript-entry-text">
-                                  {entry.text}
-                                </p>
-                              </article>
-                            ))}
-                          </div>
-                        ) : activeSession.transcript ? (
-                          <article className="transcript-entry transcript-legacy-entry">
-                            <span className="transcript-time">
-                              Earlier transcript
-                            </span>
-                            <p className="transcript-entry-text">
-                              {activeSession.transcript}
-                            </p>
-                          </article>
-                        ) : (
-                          <div className="conversation-empty">
-                            <div
-                              className="conversation-mark"
-                              aria-hidden="true"
-                            >
-                              <span />
-                              <span />
-                              <span />
-                              <span />
-                              <span />
-                            </div>
-                            <h3>Your words, as they happen.</h3>
-                            <p>
-                              Start live transcription and recognized speech
-                              will appear here, with a timestamp for each
-                              captured segment.
-                            </p>
-                          </div>
-                        )}
-
-                        {interimTranscript && (
-                          <article className="transcript-entry transcript-entry-pending">
-                            <span className="transcript-time">
-                              Listening now
-                            </span>
-                            <p className="transcript-interim">
-                              {interimTranscript}
-                            </p>
-                          </article>
-                        )}
-                      </div>                      <div className="microphone-setup">
-                        <div className="microphone-status-line">
-                          <span
-                            className={`microphone-status-dot ${
-                              transcriptionStatus === 'on'
-                                ? 'on'
-                                : transcriptionStatus === 'error'
-                                  ? 'error'
-                                  : transcriptionStatus === 'starting'
-                                    ? 'requesting'
-                                    : ''
-                            }`}
-                          />
-                          <span>
-                            {transcriptionStatus === 'on'
-                              ? 'Live transcription is on'
-                              : transcriptionStatus === 'starting'
-                                ? 'Starting speech recognition…'
-                                : transcriptionStatus === 'error'
-                                  ? 'Transcription unavailable'
-                                  : 'Live transcription is off'}
-                          </span>
-                        </div>
-
-                        {transcriptionError && (
-                          <p className="microphone-error" role="alert">
-                            {transcriptionError}
-                          </p>
-                        )}
-
-                        {transcriptionStatus === 'on' ? (
-                          <button
-                            className="microphone-button microphone-stop"
-                            onClick={stopTranscription}
-                          >
-                            <span aria-hidden="true">■</span> Stop
-                            transcription
-                          </button>
-                        ) : (
-                          <button
-                            className="microphone-button"
-                            onClick={startTranscription}
-                            disabled={transcriptionStatus === 'starting'}
-                          >
-                            <span aria-hidden="true">◉</span>
-                            {transcriptionStatus === 'starting'
-                              ? 'Starting…'
-                              : 'Start live transcription'}
-                          </button>
-                        )}
-
-                        <p className="microphone-disclaimer">
-                          Uses your browser’s speech recognition. Support and
-                          processing vary by browser; speech may be sent to the
-                          browser provider’s service.
-                        </p>
-                      </div>
-
-                      <div className="panel-footer">
-                        <span>
-                          Transcript ·{' '}
-                          {activeSession.transcriptEntries?.length ??
-                            (activeSession.transcript ? 1 : 0)}{' '}
-                          segments
-                        </span>
-                        <span>
-                          {transcriptionStatus === 'on'
-                            ? 'Listening for speech'
-                            : 'Saved to this session'}
-                        </span>
-                      </div>
-                    </section>
-
-                    <section className="meeting-panel notes-panel">
-                      <div className="panel-heading">
-                        <div>
-                          <span className="panel-overline">
-                            02 / KEEP CLOSE
-                          </span>
-                          <h2>Your notes</h2>
-                        </div>
-                        <span className="panel-icon" aria-hidden="true">
-                          ✳
-                        </span>
-                      </div>
-
-                      <p className="notes-intro">
-                        Catch a thought before it slips away.
-                      </p>
-
-                      <label
-                        className="notes-label"
-                        htmlFor="meeting-notes"
-                      >
-                        PERSONAL MEETING NOTES
-                      </label>
-
-                      <textarea
-                        id="meeting-notes"
-                        className="meeting-notes-input"
-                        value={activeSession.notes ?? ''}
-                        onChange={(event) =>
-                          updateNotes(event.target.value)
-                        }
-                        placeholder={
-                          '• Things to follow up on...\n\n• Questions to ask...\n\n• Ideas worth keeping...'
-                        }
-                      />
-
-                      <div className="panel-footer notes-footer">
-                        <span>Private workspace</span>
-                        <span>Saved automatically</span>
-                      </div>
-                    </section>
-                  </div>
-                </div>
-              ) : (
-                <>
-                  <p className="kicker">
-                    YOUR MEETINGS, IN ONE PLACE
-                  </p>
-
-                  <div className="subpage-heading">
-                    <div>
-                      <h1>Your sessions.</h1>
-                      <p className="intro-copy">
-                        Every conversation starts somewhere.
-                      </p>
-                    </div>
-
+                  <div className="meeting-controls">
                     <button
                       className="start-session"
-                      onClick={() => setShowSetup(true)}
+                      onClick={isRecording ? stopTranscription : startTranscription}
                     >
-                      New session <span aria-hidden="true">↗</span>
+                      {isRecording ? 'Stop recording' : 'Start recording'}
+                      <span aria-hidden="true">
+                        {isRecording ? ' ■' : ' ↗'}
+                      </span>
+                    </button>
+
+                    <button
+                      className="secondary-button"
+                      onClick={() => setActiveSession(null)}
+                    >
+                      Back to home
                     </button>
                   </div>
 
-                  {sessions.length === 0 ? (
-                    <div className="empty-state">
-                      <span className="empty-mark">↗</span>
-                      <h2>Nothing here just yet.</h2>
-                      <p>Your first session will start the story.</p>
+                  {microphoneError && (
+                    <p className="microphone-error" role="alert">
+                      {microphoneError}
+                    </p>
+                  )}
+
+                  <div className="meeting-notes">
+                    <label htmlFor="meeting-notes">Your notes</label>
+                    <textarea
+                      id="meeting-notes"
+                      className="meeting-notes-input"
+                      value={activeSession.notes}
+                      onChange={(event) =>
+                        updateNotes(event.target.value)
+                      }
+                      placeholder="Capture your thoughts here..."
+                    />
+                  </div>
+                </div>
+
+                <div className="meeting-panel">
+                  <div className="panel-heading">
+                    <div>
+                      <span className="panel-overline">LIVE CONVERSATION</span>
+                      <h2>Transcript</h2>
+                    </div>
+                    <span className="panel-icon" aria-hidden="true">
+                      ✳
+                    </span>
+                  </div>
+
+                  <label
+                    className="notes-label"
+                    htmlFor="transcript-search"
+                  >
+                    SEARCH TRANSCRIPT
+                  </label>
+
+                  <input
+                    id="transcript-search"
+                    className="transcript-search-input"
+                    type="search"
+                    value={transcriptSearch}
+                    onChange={(event) =>
+                      setTranscriptSearch(event.target.value)
+                    }
+                    placeholder="Find a word or phrase..."
+                    aria-label="Search transcript"
+                  />
+
+                  <div
+                    className="transcript-content"
+                    aria-live="polite"
+                    aria-relevant="additions text"
+                  >
+                    {searchQuery ? (
+                      visibleTranscriptEntries.length > 0 ? (
+                        <div className="transcript-entry-list">
+                          {visibleTranscriptEntries.map((entry) => (
+                            <article
+                              className="transcript-entry"
+                              key={entry.id}
+                            >
+                              <time className="transcript-time">
+                                {entry.time}
+                              </time>
+                              <p className="transcript-entry-text">
+                                {entry.text}
+                              </p>
+                            </article>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="conversation-empty">
+                          <h3>No matching transcript segments.</h3>
+                          <p>Try another word or clear your search.</p>
+                        </div>
+                      )
+                    ) : transcriptEntries.length > 0 ? (
+                      <div className="transcript-entry-list">
+                        {transcriptEntries.map((entry) => (
+                          <article
+                            className="transcript-entry"
+                            key={entry.id}
+                          >
+                            <time className="transcript-time">
+                              {entry.time}
+                            </time>
+                            <p className="transcript-entry-text">
+                              {entry.text}
+                            </p>
+                          </article>
+                        ))}
+                      </div>
+                    ) : (
+                      <p>
+                        {isRecording
+                          ? 'Listening for speech...'
+                          : 'Your transcript will appear here when you record.'}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </section>
+          )}
+
+          {page === 'sessions' && (
+            <section className="subpage">
+              <p className="kicker">A RECORD OF THE ROOM</p>
+              <h1>Your sessions.</h1>
+
+              {sessions.length === 0 ? (
+                <div className="empty-state">
+                  <span className="empty-mark">✳</span>
+                  <h2>Nothing here just yet.</h2>
+                  <p>
+                    Start your first session and your conversations will find
+                    a home here.
+                  </p>
+                  <button
+                    className="start-session"
+                    onClick={() => openPage('home')}
+                  >
+                    Start a session <span aria-hidden="true">↗</span>
+                  </button>
+                </div>
+              ) : (
+                <div className="session-list">
+                  {sessions.map((session) => (
+                    <div className="session-row" key={session.id}>
+                      <button
+                        className="session-row-open"
+                        onClick={() => {
+                          void openSession(session);
+                        }}
+                      >
+                        <span className="row-symbol">◉</span>
+                        <span className="row-details">
+                          <strong>{session.title}</strong>
+                          <small>
+                            {session.createdAt}
+                          </small>
+                        </span>
+                        <span className="row-arrow">→</span>
+                      </button>
 
                       <button
-                        className="start-session"
-                        onClick={() => setShowSetup(true)}
+                        className="delete-session"
+                        onClick={() => deleteSession(session.id)}
+                        aria-label={`Delete ${session.title}`}
                       >
-                        Create your first session{' '}
-                        <span aria-hidden="true">↗</span>
+                        Delete
                       </button>
                     </div>
-                  ) : (
-                    <div className="session-list">
-                      {sessions.map((session) => (
-                        <div className="session-row" key={session.id}>
-                          <button
-                            className="session-row-open"
-                            onClick={() => openSession(session)}
-                          >
-                            <span className="row-symbol">↗</span>
-                            <span className="row-details">
-                              <strong>{session.title}</strong>
-                              <small>{session.createdAt}</small>
-                            </span>
-                            <span className="row-arrow">→</span>
-                          </button>
-
-                          <button
-                            className="delete-session"
-                            aria-label={`Delete ${session.title}`}
-                            title="Delete session"
-                            onClick={() => deleteSession(session.id)}
-                          >
-                            Delete
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </>
+                  ))}
+                </div>
               )}
             </section>
           )}
@@ -1129,34 +984,127 @@ function App() {
               <p className="kicker">THE THINGS WORTH KEEPING</p>
               <h1>Your takeaways.</h1>
 
-              <div className="empty-state takeaway-empty">
-                <span className="empty-mark">✳</span>
-                <h2>Space for the important bits.</h2>
-                <p>
-                  Meeting summaries and action items will live here once
-                  transcription and meeting insights are implemented.
-                </p>
-              </div>
+              {sessions.length === 0 ? (
+                <div className="empty-state takeaway-empty">
+                  <span className="empty-mark">✳</span>
+                  <h2>No sessions to summarize yet.</h2>
+                  <p>
+                    Create a session and capture some transcript first.
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <div className="session-list">
+                    {sessions.map((session) => (
+                      <div className="session-row" key={session.id}>
+                        <button
+                          className="session-row-open"
+                          onClick={() => generateMeetingSummary(session)}
+                          disabled={
+                            isGeneratingSummary &&
+                            summaryMeetingId === session.id
+                          }
+                        >
+                          <span className="row-symbol">✳</span>
+                          <span className="row-details">
+                            <strong>{session.title}</strong>
+                            <small>
+                              {isGeneratingSummary &&
+                              summaryMeetingId === session.id
+                                ? 'Generating takeaways…'
+                                : 'Generate AI summary'}
+                            </small>
+                          </span>
+                          <span className="row-arrow">→</span>
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+
+                  {summaryError && (
+                    <p className="microphone-error" role="alert">
+                      {summaryError}
+                    </p>
+                  )}
+
+                  {meetingSummary && (
+                    <div
+                      className="meeting-panel"
+                      style={{ marginTop: '24px' }}
+                    >
+                      <div className="panel-heading">
+                        <div>
+                          <span className="panel-overline">
+                            YOUR MEETING, DISTILLED
+                          </span>
+                          <h2>{meetingSummary.meeting_title}</h2>
+                        </div>
+                        <span className="panel-icon" aria-hidden="true">
+                          ✳
+                        </span>
+                      </div>
+
+                      <h3>Summary</h3>
+                      <p>{meetingSummary.summary}</p>
+
+                      <h3>Key points</h3>
+                      {meetingSummary.key_points.length > 0 ? (
+                        <ul>
+                          {meetingSummary.key_points.map((point, index) => (
+                            <li key={index}>{point}</li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p>No key points were identified.</p>
+                      )}
+
+                      <h3>Decisions</h3>
+                      {meetingSummary.decisions.length > 0 ? (
+                        <ul>
+                          {meetingSummary.decisions.map(
+                            (decision, index) => (
+                              <li key={index}>{decision}</li>
+                            ),
+                          )}
+                        </ul>
+                      ) : (
+                        <p>No explicit decisions were identified.</p>
+                      )}
+
+                      <h3>Action items</h3>
+                      {meetingSummary.action_items.length > 0 ? (
+                        <ul>
+                          {meetingSummary.action_items.map((item, index) => (
+                            <li key={index}>{item}</li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p>No explicit action items were identified.</p>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
             </section>
           )}
-
-          <footer className="footer">
-            <span>SIDEKICK © 2026</span>
-            <span>MADE FOR THE MOMENTS THAT MATTER</span>
-          </footer>
         </div>
+
+        <footer className="footer">
+          <span>Sidekick © {new Date().getFullYear()}</span>
+          <span>A little more present.</span>
+        </footer>
       </main>
 
       {showSetup && (
         <div
           className="modal-backdrop"
-          onMouseDown={(event) => {
+          onClick={(event) => {
             if (event.target === event.currentTarget) {
-              setShowSetup(false)
+              setShowSetup(false);
             }
           }}
         >
-          <section
+          <div
             className="setup-modal"
             role="dialog"
             aria-modal="true"
@@ -1164,40 +1112,51 @@ function App() {
           >
             <button
               className="modal-close"
-              aria-label="Close dialog"
               onClick={() => setShowSetup(false)}
+              aria-label="Close dialog"
             >
               ×
             </button>
 
-            <p className="kicker">MAKE YOURSELF AT HOME</p>
-            <h2 id="setup-title">What are we meeting about?</h2>
-            <p className="modal-description">
-              Give this session a name. You can change direction later.
+            <p className="kicker">A NEW CONVERSATION</p>
+            <h2 id="setup-title">What are we walking into?</h2>
+            <p>
+              Give this session a name. You can figure out the rest as you go.
             </p>
 
-            <form onSubmit={createSession}>
-              <label htmlFor="meeting-title">SESSION NAME</label>
+            <form
+              onSubmit={async (event) => {
+                event.preventDefault();
+                const formData = new FormData(event.currentTarget);
+                const title = String(formData.get('title') ?? '').trim();
+
+                if (!title) return;
+
+                const created = await createSession(title);
+                if (created) {
+                  setPage('home');
+                }
+              }}
+            >
+              <label htmlFor="session-title">Session name</label>
               <input
-                id="meeting-title"
+                id="session-title"
+                name="title"
+                type="text"
+                placeholder="e.g. Product brainstorm"
                 autoFocus
-                autoComplete="off"
-                value={meetingTitle}
-                onChange={(event) => setMeetingTitle(event.target.value)}
-                placeholder="e.g. Project brainstorm"
-                maxLength={100}
                 required
               />
 
-              <button className="start-session modal-submit" type="submit">
+              <button className="start-session" type="submit">
                 Create session <span aria-hidden="true">↗</span>
               </button>
             </form>
-          </section>
+          </div>
         </div>
       )}
     </div>
-  )
+  );
 }
 
-export default App
+export default App;
