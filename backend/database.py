@@ -1,15 +1,17 @@
+import os
 
-from pathlib import Path
-
+from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
-DATABASE_URL = f"sqlite:///{(Path(__file__).resolve().parent / 'sidekick.db').as_posix()}"
+load_dotenv()
 
-engine = create_engine(
-    DATABASE_URL,
-    connect_args={"check_same_thread": False},
-)
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+if not DATABASE_URL:
+    raise ValueError("DATABASE_URL is missing from .env")
+
+engine = create_engine(DATABASE_URL)
 
 SessionLocal = sessionmaker(
     bind=engine,
