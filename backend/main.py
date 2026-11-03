@@ -18,7 +18,6 @@ import models
 from database import Base, SessionLocal, engine
 
 
-# -------------------- Configuration --------------------
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
@@ -39,19 +38,23 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+allowed_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+
+frontend_url = os.getenv("FRONTEND_URL")
+if frontend_url:
+    allowed_origins.append(frontend_url.rstrip("/"))
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-
-# -------------------- Database dependency --------------------
 
 
 def get_db():
@@ -61,8 +64,6 @@ def get_db():
     finally:
         db.close()
 
-
-# -------------------- Request and response models --------------------
 
 
 class MeetingCreate(BaseModel):
@@ -110,8 +111,6 @@ class MeetingSummaryResponse(BaseModel):
     action_items: list[str]
 
 
-# -------------------- Health endpoints --------------------
-
 
 @app.get("/")
 def root():
@@ -133,7 +132,6 @@ def database_health_check(db: Session = Depends(get_db)):
     return {"status": "ok", "database": "connected"}
 
 
-# -------------------- Meeting endpoints --------------------
 
 
 @app.post(
@@ -233,8 +231,6 @@ def delete_meeting(meeting_id: int, db: Session = Depends(get_db)):
     db.commit()
 
 
-# -------------------- Transcript endpoints --------------------
-
 
 @app.post(
     "/api/meetings/{meeting_id}/segments",
@@ -300,7 +296,6 @@ def list_transcript_segments(
     return db.scalars(statement).all()
 
 
-# -------------------- Groq AI meeting summary --------------------
 
 
 @app.post(
@@ -345,7 +340,6 @@ def generate_meeting_summary(
             detail="This meeting has no transcript to summarize yet.",
         )
 
-    # Limit transcript size for this initial version.
     transcript = transcript[:30000]
 
     try:

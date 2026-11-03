@@ -1,75 +1,76 @@
-# React + TypeScript + Vite
+# Sidekick — Real-Time Meeting Copilot
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Sidekick is a meeting assistant that helps capture conversations, maintain transcripts, and turn discussions into structured meeting takeaways.
 
-Currently, two official plugins are available:
+It helps users focus on conversations while keeping important points, decisions, and action items organised.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Features
 
-## React Compiler
+- **Meeting Sessions:** Create, manage, and revisit meeting sessions.
+- **Live Transcription:** Capture speech using browser-based speech recognition.
+- **Meeting Notes:** Write and save notes for individual sessions.
+- **Transcript Storage:** Persist meeting transcripts and session data.
+- **AI-Powered Takeaways:** Generate summaries, key discussion points, decisions, and action items.
+- **Transcript Search:** Search through saved meeting conversations.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Tech Stack
 
-## Expanding the ESLint configuration
+| Layer | Technologies |
+|---|---|
+| Frontend | React, TypeScript, Vite |
+| Backend | Python, FastAPI |
+| Database | PostgreSQL, Neon |
+| ORM | SQLAlchemy |
+| AI | OpenAI-compatible API |
+| Speech Recognition | Browser SpeechRecognition API |
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+## Project Structure
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-
+```text
+sidekick/
+├── backend/
+│   ├── main.py
+│   ├── database.py
+│   ├── models.py
+│   └── requirements.txt
+├── public/
+├── src/
+│   ├── App.tsx
+│   ├── App.css
+│   └── main.tsx
+├── index.html
+└── package.json
 ```
 
-You can also install [eslint-plugin-react-x](https://npmx.dev/package/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://npmx.dev/package/eslint-plugin-react-dom) for React-specific lint rules:
+## Run Locally
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+**1. Clone the repository**
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+git clone https://github.com/Viinuthaa/sidekick.git
+cd sidekick
+```
 
+**2. Install frontend dependencies**
+
+```bash
+npm install
+```
+
+**3. Start the backend**
+
+```bash
+cd backend
+pip install -r requirements.txt
+uvicorn main:app --reload
+```
+
+Configure the backend environment variables, including your PostgreSQL connection string and AI API credentials, before starting the backend.
+
+**4. Start the frontend**
+
+In a separate terminal:
+
+```bash
+npm run dev
 ```
