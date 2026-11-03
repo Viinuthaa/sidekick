@@ -1,4 +1,4 @@
-﻿import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import './App.css'
 
 type Session = {
@@ -38,7 +38,7 @@ type SpeechRecognitionWindow = Window & {
 
 type Page = 'home' | 'sessions' | 'takeaways'
 
-const API_BASE_URL = 'http://127.0.0.1:8000'
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/$/, '')
 
 type ApiMeeting = {
   id: number
@@ -649,13 +649,6 @@ function App() {
           </button>
         </nav>
 
-        <div className="rail-bottom">
-          <span className="avatar">s</span>
-          <div>
-            <strong>Your Sidekick</strong>
-            <span>Here for the details</span>
-          </div>
-        </div>
       </aside>
 
       <main className="page">
@@ -668,7 +661,19 @@ function App() {
               openPage('home')
             }}
           >
-            sidekick
+           <svg
+            className="brand-wave"
+            viewBox="0 0 32 32"
+            fill="none"
+            aria-hidden="true"
+           >
+            <path d="M5 13V19" />
+            <path d="M11 8V24" />
+            <path d="M16 4V28" />
+            <path d="M21 10V22" />
+            <path d="M27 13V19" />
+           </svg>
+           <span>sidekick</span>
           </a>
 
           <span className="availability">
@@ -718,20 +723,22 @@ function App() {
                     <span />
                     <span />
                     <span />
-                    <div className="orbit-core">s.</div>
+                    <div className="orbit-wave">
+                      <i />
+                      <i />
+                      <i />
+                      <i />
+                      <i />
+                    </div>
                   </div>
                 </div>
 
                 <div className="waveform" aria-hidden="true">
-                  {Array.from({ length: 39 }, (_, index) => (
+                  {Array.from({ length: 33 }, (_, index) => (
                     <i
                       key={index}
                       style={{
-                        height: `${
-                          9 +
-                          Math.abs(Math.sin(index * 0.58)) * 52 +
-                          Math.abs(Math.cos(index * 0.23)) * 18
-                        }px`,
+                        height: `${12 + (Math.sin(index * 0.38) + 1) * 15 + (Math.sin(index * 0.13 + 0.8) + 1) * 9}px`,
                       }}
                     />
                   ))}
@@ -791,7 +798,7 @@ function App() {
                 <div className="meeting-panel">
                   <div className="panel-heading">
                     <div>
-                      <span className="panel-overline">YOUR SESSION</span>
+                      <span className="panel-eyebrow">YOUR SESSION</span>
                       <h2>{activeSession.title}</h2>
                     </div>
                     <span className="panel-icon" aria-hidden="true">
@@ -818,6 +825,17 @@ function App() {
                     </button>
                   </div>
 
+                  <div className={`recording-status ${isRecording ? 'is-recording' : transcriptionStatus === 'error' ? 'has-error' : ''}`} role="status">
+                    <span className="recording-status-dot" />
+                    {transcriptionStatus === 'starting'
+                      ? 'Connecting to microphone'
+                      : isRecording
+                        ? 'Recording live'
+                        : transcriptionStatus === 'error'
+                          ? 'Recording unavailable'
+                          : 'Not recording'}
+                  </div>
+
                   {microphoneError && (
                     <p className="microphone-error" role="alert">
                       {microphoneError}
@@ -841,7 +859,7 @@ function App() {
                 <div className="meeting-panel">
                   <div className="panel-heading">
                     <div>
-                      <span className="panel-overline">LIVE CONVERSATION</span>
+                      <span className="panel-eyebrow">LIVE CONVERSATION</span>
                       <h2>Transcript</h2>
                     </div>
                     <span className="panel-icon" aria-hidden="true">
@@ -850,7 +868,7 @@ function App() {
                   </div>
 
                   <label
-                    className="notes-label"
+                    className="search-eyebrow"
                     htmlFor="transcript-search"
                   >
                     SEARCH TRANSCRIPT
@@ -926,53 +944,62 @@ function App() {
           )}
 
           {page === 'sessions' && (
-            <section className="subpage">
-              <p className="kicker">A RECORD OF THE ROOM</p>
-              <h1>Your sessions.</h1>
+            <section className="subpage sessions-page">
+              <div className="page-hero">
+                <div>
+                  <p className="section-eyebrow">A RECORD OF THE ROOM</p>
+                  <h1>Your sessions<span className="heading-period">.</span></h1>
+                  <p className="page-intro">
+                    Every conversation, safely kept in one place. Pick up right where you left off.
+                  </p>
+                </div>
+                <div className="page-hero-aside">
+                  <span className="hero-stat-number">{sessions.length.toString().padStart(2, '0')}</span>
+                  <span className="hero-stat-label">SESSIONS SAVED</span>
+                  <button className="start-session hero-action" onClick={() => setShowSetup(true)}>
+                    New session <span aria-hidden="true">↗</span>
+                  </button>
+                </div>
+              </div>
 
               {sessions.length === 0 ? (
                 <div className="empty-state">
                   <span className="empty-mark">✳</span>
                   <h2>Nothing here just yet.</h2>
-                  <p>
-                    Start your first session and your conversations will find
-                    a home here.
-                  </p>
-                  <button
-                    className="start-session"
-                    onClick={() => openPage('home')}
-                  >
+                  <p>Start your first session and your conversations will find a home here.</p>
+                  <button className="start-session" onClick={() => setShowSetup(true)}>
                     Start a session <span aria-hidden="true">↗</span>
                   </button>
                 </div>
               ) : (
-                <div className="session-list">
-                  {sessions.map((session) => (
-                    <div className="session-row" key={session.id}>
-                      <button
-                        className="session-row-open"
-                        onClick={() => {
-                          void openSession(session);
-                        }}
-                      >
-                        <span className="row-symbol">◉</span>
-                        <span className="row-details">
-                          <strong>{session.title}</strong>
-                          <small>
-                            {session.createdAt}
-                          </small>
-                        </span>
-                        <span className="row-arrow">→</span>
-                      </button>
-
-                      <button
-                        className="delete-session"
-                        onClick={() => deleteSession(session.id)}
-                        aria-label={`Delete ${session.title}`}
-                      >
-                        Delete
-                      </button>
-                    </div>
+                <div className="sessions-grid">
+                  {sessions.map((session, index) => (
+                    <article className="session-card" key={session.id}>
+                      <div className="session-card-top">
+                        <span className="session-card-index">{String(index + 1).padStart(2, '0')}</span>
+                        <span className="session-card-symbol" aria-hidden="true">◉</span>
+                      </div>
+                      <div className="session-card-content">
+                        <span className="session-card-label">MEETING NOTES</span>
+                        <h2>{session.title}</h2>
+                        <p>{session.createdAt}</p>
+                      </div>
+                      <div className="session-card-bottom">
+                        <button
+                          className="session-card-open"
+                          onClick={() => { void openSession(session); }}
+                        >
+                          Open session <span aria-hidden="true">↗</span>
+                        </button>
+                        <button
+                          className="delete-session"
+                          onClick={() => deleteSession(session.id)}
+                          aria-label={`Delete ${session.title}`}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </article>
                   ))}
                 </div>
               )}
@@ -980,108 +1007,112 @@ function App() {
           )}
 
           {page === 'takeaways' && (
-            <section className="subpage">
-              <p className="kicker">THE THINGS WORTH KEEPING</p>
-              <h1>Your takeaways.</h1>
+            <section className="subpage takeaways-page">
+              <div className="page-hero">
+                <div>
+                  <p className="section-eyebrow">THE THINGS WORTH KEEPING</p>
+                  <h1>Good things <span className="heading-italic">stick.</span></h1>
+                  <p className="page-intro">
+                    Turn conversations into clear notes, decisions and next steps. Choose a session to distil it.
+                  </p>
+                </div>
+                <div className="takeaway-hero-mark" aria-hidden="true">
+                  <span>✳</span>
+                  <small>LESS RECAP.<br />MORE FOLLOW-THROUGH.</small>
+                </div>
+              </div>
 
               {sessions.length === 0 ? (
                 <div className="empty-state takeaway-empty">
                   <span className="empty-mark">✳</span>
                   <h2>No sessions to summarize yet.</h2>
-                  <p>
-                    Create a session and capture some transcript first.
-                  </p>
+                  <p>Create a session and capture some transcript first.</p>
+                  <button className="start-session" onClick={() => openPage('home')}>
+                    Go to home <span aria-hidden="true">↗</span>
+                  </button>
                 </div>
               ) : (
                 <>
-                  <div className="session-list">
-                    {sessions.map((session) => (
-                      <div className="session-row" key={session.id}>
+                  <div className="takeaways-section-heading">
+                    <div>
+                      <span className="section-eyebrow">READY WHEN YOU ARE</span>
+                      <h2>Choose a conversation</h2>
+                    </div>
+                    <span className="takeaway-count">{sessions.length} {sessions.length === 1 ? 'SESSION' : 'SESSIONS'}</span>
+                  </div>
+
+                  <div className="takeaways-grid">
+                    {sessions.map((session, index) => (
+                      <article className={`takeaway-card ${summaryMeetingId === session.id && meetingSummary ? 'is-summarized' : ''}`} key={session.id}>
+                        <div className="takeaway-card-top">
+                          <span className="takeaway-card-number">{String(index + 1).padStart(2, '0')}</span>
+                          <span className="takeaway-card-icon" aria-hidden="true">✳</span>
+                        </div>
+                        <div className="takeaway-card-content">
+                          <span className="session-card-label">CONVERSATION</span>
+                          <h3>{session.title}</h3>
+                          <p>{session.createdAt}</p>
+                        </div>
                         <button
-                          className="session-row-open"
+                          className="takeaway-generate"
                           onClick={() => generateMeetingSummary(session)}
-                          disabled={
-                            isGeneratingSummary &&
-                            summaryMeetingId === session.id
-                          }
+                          disabled={isGeneratingSummary && summaryMeetingId === session.id}
                         >
-                          <span className="row-symbol">✳</span>
-                          <span className="row-details">
-                            <strong>{session.title}</strong>
-                            <small>
-                              {isGeneratingSummary &&
-                              summaryMeetingId === session.id
-                                ? 'Generating takeaways…'
-                                : 'Generate AI summary'}
-                            </small>
-                          </span>
-                          <span className="row-arrow">→</span>
+                          {isGeneratingSummary && summaryMeetingId === session.id
+                            ? 'Gathering the details…'
+                            : summaryMeetingId === session.id && meetingSummary
+                              ? 'View takeaways'
+                              : 'Generate takeaways'}
+                          <span aria-hidden="true">↗</span>
                         </button>
-                      </div>
+                      </article>
                     ))}
                   </div>
 
                   {summaryError && (
-                    <p className="microphone-error" role="alert">
-                      {summaryError}
-                    </p>
+                    <p className="microphone-error" role="alert">{summaryError}</p>
                   )}
 
                   {meetingSummary && (
-                    <div
-                      className="meeting-panel"
-                      style={{ marginTop: '24px' }}
-                    >
-                      <div className="panel-heading">
+                    <section className="summary-board">
+                      <div className="summary-board-heading">
                         <div>
-                          <span className="panel-overline">
-                            YOUR MEETING, DISTILLED
-                          </span>
+                          <span className="section-eyebrow">YOUR MEETING, DISTILLED</span>
                           <h2>{meetingSummary.meeting_title}</h2>
+                          <p>Here’s what’s worth carrying forward.</p>
                         </div>
-                        <span className="panel-icon" aria-hidden="true">
-                          ✳
-                        </span>
+                        <span className="summary-board-mark" aria-hidden="true">✳</span>
                       </div>
 
-                      <h3>Summary</h3>
-                      <p>{meetingSummary.summary}</p>
+                      <article className="summary-lead">
+                        <span className="summary-label">THE SHORT VERSION</span>
+                        <p>{meetingSummary.summary}</p>
+                      </article>
 
-                      <h3>Key points</h3>
-                      {meetingSummary.key_points.length > 0 ? (
-                        <ul>
-                          {meetingSummary.key_points.map((point, index) => (
-                            <li key={index}>{point}</li>
-                          ))}
-                        </ul>
-                      ) : (
-                        <p>No key points were identified.</p>
-                      )}
-
-                      <h3>Decisions</h3>
-                      {meetingSummary.decisions.length > 0 ? (
-                        <ul>
-                          {meetingSummary.decisions.map(
-                            (decision, index) => (
-                              <li key={index}>{decision}</li>
-                            ),
-                          )}
-                        </ul>
-                      ) : (
-                        <p>No explicit decisions were identified.</p>
-                      )}
-
-                      <h3>Action items</h3>
-                      {meetingSummary.action_items.length > 0 ? (
-                        <ul>
-                          {meetingSummary.action_items.map((item, index) => (
-                            <li key={index}>{item}</li>
-                          ))}
-                        </ul>
-                      ) : (
-                        <p>No explicit action items were identified.</p>
-                      )}
-                    </div>
+                      <div className="summary-detail-grid">
+                        <article className="summary-detail-card">
+                          <span className="summary-detail-number">01</span>
+                          <h3>Key points</h3>
+                          {meetingSummary.key_points.length > 0 ? (
+                            <ul>{meetingSummary.key_points.map((point, index) => <li key={index}>{point}</li>)}</ul>
+                          ) : <p>No key points were identified.</p>}
+                        </article>
+                        <article className="summary-detail-card">
+                          <span className="summary-detail-number">02</span>
+                          <h3>Decisions</h3>
+                          {meetingSummary.decisions.length > 0 ? (
+                            <ul>{meetingSummary.decisions.map((decision, index) => <li key={index}>{decision}</li>)}</ul>
+                          ) : <p>No explicit decisions were identified.</p>}
+                        </article>
+                        <article className="summary-detail-card action-items-card">
+                          <span className="summary-detail-number">03</span>
+                          <h3>Action items</h3>
+                          {meetingSummary.action_items.length > 0 ? (
+                            <ul>{meetingSummary.action_items.map((item, index) => <li key={index}>{item}</li>)}</ul>
+                          ) : <p>No explicit action items were identified.</p>}
+                        </article>
+                      </div>
+                    </section>
                   )}
                 </>
               )}
