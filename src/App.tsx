@@ -1,5 +1,9 @@
-import { useEffect, useRef, useState } from 'react'
+﻿import { useEffect, useRef, useState } from 'react'
 import './App.css'
+import {
+  startMeetingAudioCapture,
+  type MeetingAudioCaptureController,
+} from './lib/meetingAudioCapture'
 
 type Session = {
   id: number
@@ -8,32 +12,6 @@ type Session = {
   notes?: string
   transcript?: string
   transcriptEntries?: { id: string; time: string; text: string }[]
-}
-
-type SpeechResult = {
-  isFinal: boolean
-  0: { transcript: string }
-}
-
-type SpeechRecognitionEventLike = {
-  resultIndex: number
-  results: ArrayLike<SpeechResult>
-}
-
-type SpeechRecognitionLike = {
-  lang: string
-  continuous: boolean
-  interimResults: boolean
-  onresult: ((event: SpeechRecognitionEventLike) => void) | null
-  onerror: ((event: { error: string }) => void) | null
-  onend: (() => void) | null
-  start: () => void
-  stop: () => void
-}
-
-type SpeechRecognitionWindow = Window & {
-  SpeechRecognition?: new () => SpeechRecognitionLike
-  webkitSpeechRecognition?: new () => SpeechRecognitionLike
 }
 
 type Page = 'home' | 'sessions' | 'takeaways'
@@ -148,13 +126,14 @@ async function apiRequest<T>(
 function App() {
   const [page, setPage] = useState<Page>('home')
   const [showSetup, setShowSetup] = useState(false)
-  const [, setMeetingTitle] = useState('')
   const [sessions, setSessions] = useState<Session[]>([])
   const [activeSession, setActiveSession] = useState<Session | null>(null)
   const [isLoadingSessions, setIsLoadingSessions] = useState(true)
   const [apiError, setApiError] = useState('')
-  const recognitionRef = useRef<SpeechRecognitionLike | null>(null)
-  const transcriptRef = useRef('')
+  const audioCaptureRef =
+  useRef<MeetingAudioCaptureController | null>(null)
+
+  const captureGenerationRef = useRef(0)
   const notesSaveTimeoutRef =
     useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -162,9 +141,8 @@ function App() {
     'off' | 'starting' | 'on' | 'error'
   >('off')
   const [transcriptionError, setTranscriptionError] = useState('')
-  const [, setInterimTranscript] = useState('')
   const [transcriptSearch, setTranscriptSearch] = useState('')
-
+  const [capturedChunkCount, setCapturedChunkCount] = useState(0)
   const [meetingSummary, setMeetingSummary] =
     useState<MeetingSummary | null>(null)
   const [isGeneratingSummary, setIsGeneratingSummary] = useState(false)
@@ -174,15 +152,21 @@ function App() {
   )
 
   useEffect(() => {
-    return () => {
-      recognitionRef.current?.stop()
-      recognitionRef.current = null
+   return () => {
+    captureGenerationRef.current += 1
 
-      if (notesSaveTimeoutRef.current) {
-        clearTimeout(notesSaveTimeoutRef.current)
-      }
+    const capture = audioCaptureRef.current
+    audioCaptureRef.current = null
+
+    if (capture) {
+      void capture.stop()
     }
-  }, [])
+
+    if (notesSaveTimeoutRef.current) {
+      clearTimeout(notesSaveTimeoutRef.current)
+    }
+  }
+}, [])
 
   useEffect(() => {
     let cancelled = false
@@ -217,256 +201,119 @@ function App() {
     }
   }, [])
 
-  function startTranscription() {
-    if (!activeSession) return
-
-    transcriptRef.current = activeSession.transcript ?? ''
-    setTranscriptionError('')
-    setInterimTranscript('')
-
-    const speechWindow = window as SpeechRecognitionWindow
-    const Recognition =
-      speechWindow.SpeechRecognition ??
-      speechWindow.webkitSpeechRecognition
-
-    if (!Recognition) {
-      setTranscriptionStatus('error')
-      setTranscriptionError(
-        'Live speech recognition is not supported in this browser. Try a current version of Google Chrome or Microsoft Edge.',
-      )
-      return
-    }
-
-    try {
-      const recognition = new Recognition()
-      recognition.lang = 'en-US'
-      recognition.continuous = true
-      recognition.interimResults = true
-
-      recognition.onresult = (event) => {
-        let finalText = ''
-        let interimText = ''
-
-        for (
-          let index = event.resultIndex;
-          index < event.results.length;
-          index += 1
-        ) {
-          const result = event.results[index]
-          if (!result?.[0]?.transcript) continue
-
-          if (result.isFinal) {
-            finalText += `${result[0].transcript.trim()} `
-          } else {
-            interimText += `${result[0].transcript} `
-          }
-        }
-
-        if (finalText.trim()) {
-          const addition = finalText.trim()
-          transcriptRef.current = transcriptRef.current
-            ? `${transcriptRef.current} ${addition}`
-            : addition
-
-          const entry = {
-            id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-            time: new Date().toLocaleTimeString([], {
-              hour: '2-digit',
-              minute: '2-digit',
-              second: '2-digit',
-            }),
-            text: addition,
-          }
-
-          void apiRequest<ApiTranscriptSegment>(
-            `/api/meetings/${activeSession.id}/segments`,
-            {
-              method: 'POST',
-              body: JSON.stringify({
-                time: entry.time,
-                text: entry.text,
-              }),
-            },
-          )
-            .then((savedSegment) => {
-              const savedEntry = {
-                id: String(savedSegment.id),
-                time: savedSegment.time,
-                text: savedSegment.text,
-              }
-
-              setSessions((current) =>
-                current.map((session) =>
-                  session.id === activeSession.id
-                    ? {
-                        ...session,
-                        transcriptEntries: (
-                          session.transcriptEntries ?? []
-                        ).map((item) =>
-                          item.id === entry.id ? savedEntry : item,
-                        ),
-                      }
-                    : session,
-                ),
-              )
-
-              setActiveSession((current) => {
-                if (
-                  !current ||
-                  current.id !== activeSession.id
-                ) {
-                  return current
-                }
-
-                return {
-                  ...current,
-                  transcriptEntries: (
-                    current.transcriptEntries ?? []
-                  ).map((item) =>
-                    item.id === entry.id ? savedEntry : item,
-                  ),
-                }
-              })
-            })
-            .catch((error) => {
-              console.error('Could not save transcript segment:', error)
-              setApiError(
-                'Transcript segment could not be saved to the database.',
-              )
-            })
-
-          setSessions((current) =>
-            current.map((session) => {
-              if (session.id !== activeSession.id) return session
-
-              const existing = session.transcript?.trim() ?? ''
-
-              return {
-                ...session,
-                transcript: existing
-                  ? `${existing} ${addition}`
-                  : addition,
-                transcriptEntries: [
-                  ...(session.transcriptEntries ?? []),
-                  entry,
-                ],
-              }
-            }),
-          )
-
-          setActiveSession((current) => {
-            if (
-              !current ||
-              current.id !== activeSession.id
-            ) {
-              return current
-            }
-
-            const existing = current.transcript?.trim() ?? ''
-
-            return {
-              ...current,
-              transcript: existing
-                ? `${existing} ${addition}`
-                : addition,
-              transcriptEntries: [
-                ...(current.transcriptEntries ?? []),
-                entry,
-              ],
-            }
-          })
-        }
-
-        setInterimTranscript(interimText.trim())
-      }
-
-      recognition.onerror = (event) => {
-        setTranscriptionStatus('error')
-
-        if (
-          event.error === 'not-allowed' ||
-          event.error === 'service-not-allowed'
-        ) {
-          setTranscriptionError(
-            'Microphone or speech recognition permission was denied. Check your browser permissions and try again.',
-          )
-        } else if (event.error === 'no-speech') {
-          setTranscriptionError(
-            'No speech was detected. Try speaking closer to your microphone.',
-          )
-        } else {
-          setTranscriptionError(
-            `Speech recognition stopped: ${event.error}. You can try starting it again.`,
-          )
-        }
-
-        recognitionRef.current = null
-      }
-
-      recognition.onend = () => {
-        if (recognitionRef.current === recognition) {
-          recognitionRef.current = null
-          setTranscriptionStatus((status) =>
-            status === 'on' ? 'off' : status,
-          )
-        }
-      }
-
-      recognitionRef.current = recognition
-      setTranscriptionStatus('starting')
-      recognition.start()
-      setTranscriptionStatus('on')
-    } catch {
-      recognitionRef.current = null
-      setTranscriptionStatus('error')
-      setTranscriptionError(
-        'Could not start speech recognition. Check your browser permissions and try again.',
-      )
-    }
-  }
-
-  function stopTranscription() {
-    recognitionRef.current?.stop()
-    recognitionRef.current = null
-    setTranscriptionStatus('off')
-    setInterimTranscript('')
-    setTranscriptionError('')
-  }
-
-  async function createSession(title: string): Promise<Session | null> {
-    const trimmedTitle = title.trim()
-    if (!trimmedTitle) return null
-
+  async function createSession(title: string): Promise<boolean> {
     try {
       setApiError('')
 
       const meeting = await apiRequest<ApiMeeting>('/api/meetings', {
         method: 'POST',
-        body: JSON.stringify({
-          title: trimmedTitle,
-          transcript: '',
-          notes: '',
-        }),
+        body: JSON.stringify({ title }),
       })
 
       const session = toSession(meeting)
 
       setSessions((current) => [session, ...current])
       setActiveSession(session)
-      setMeetingTitle('')
       setShowSetup(false)
-      setPage('home')
-      return session
+      setTranscriptSearch('')
+      setTranscriptionStatus('off')
+      setTranscriptionError('')
+
+      return true
     } catch (error) {
       setApiError(
         error instanceof Error
           ? error.message
           : 'Could not create the meeting. Please try again.',
       )
-      return null
+      return false
     }
   }
 
+  async function startTranscription() {
+  if (!activeSession) return
+
+  const attempt = ++captureGenerationRef.current
+
+  setTranscriptionError('')
+  setCapturedChunkCount(0)
+  setTranscriptionStatus('starting')
+
+  try {
+    const capture = await startMeetingAudioCapture({
+      onChunk: (chunk) => {
+        console.info(
+          `[Sidekick] ${chunk.source} audio chunk captured`,
+          {
+            size: chunk.blob.size,
+            mimeType: chunk.mimeType,
+            capturedAt: chunk.capturedAt,
+          },
+        )
+
+        setCapturedChunkCount((count) => count + 1)
+      },
+
+      onCaptureEnded: () => {
+        const currentCapture = audioCaptureRef.current
+        audioCaptureRef.current = null
+
+        if (currentCapture) {
+          void currentCapture.stop()
+        }
+
+        setTranscriptionStatus('error')
+        setTranscriptionError(
+          'The shared meeting audio or microphone stopped. Please start recording again.',
+        )
+      },
+
+      onError: (message) => {
+        setTranscriptionStatus('error')
+        setTranscriptionError(message)
+
+        const currentCapture = audioCaptureRef.current
+        audioCaptureRef.current = null
+
+        if (currentCapture) {
+          void currentCapture.stop()
+        }
+      },
+    })
+
+    // The user might have navigated away while granting permissions.
+    if (attempt !== captureGenerationRef.current) {
+      await capture.stop()
+      return
+    }
+
+    audioCaptureRef.current = capture
+    setTranscriptionStatus('on')
+  } catch (error) {
+    if (attempt !== captureGenerationRef.current) return
+
+    setTranscriptionStatus('error')
+    setTranscriptionError(
+      error instanceof Error
+        ? error.message
+        : 'Could not start meeting audio capture.',
+    )
+  }
+}
+
+function stopTranscription() {
+  captureGenerationRef.current += 1
+
+  const capture = audioCaptureRef.current
+  audioCaptureRef.current = null
+
+  if (capture) {
+    void capture.stop()
+  }
+
+  setTranscriptionStatus('off')
+  setTranscriptionError('')
+}
   async function deleteSession(id: number) {
     try {
       setApiError('')
@@ -828,13 +675,24 @@ function App() {
                   <div className={`recording-status ${isRecording ? 'is-recording' : transcriptionStatus === 'error' ? 'has-error' : ''}`} role="status">
                     <span className="recording-status-dot" />
                     {transcriptionStatus === 'starting'
-                      ? 'Connecting to microphone'
+                      ? 'Requesting microphone and meeting-tab access'
                       : isRecording
-                        ? 'Recording live'
+                        ? 'Capturing microphone + meeting audio'
                         : transcriptionStatus === 'error'
-                          ? 'Recording unavailable'
+                          ? 'Audio capture unavailable'
                           : 'Not recording'}
                   </div>
+                  {isRecording && (
+  <p className="capture-chunk-status">
+    Audio chunks captured: {capturedChunkCount}
+  </p>
+)}
+
+<p className="capture-notice">
+  Sidekick captures audio from your selected browser tab and microphone.
+  Make sure everyone has agreed to be recorded. Headphones are recommended
+  to reduce echo.
+</p>
 
                   {microphoneError && (
                     <p className="microphone-error" role="alert">
@@ -933,7 +791,7 @@ function App() {
                     ) : (
                       <p>
                         {isRecording
-                          ? 'Listening for speech...'
+                          ? 'Audio capture is active. Live transcription will be connected in the next commit.'
                           : 'Your transcript will appear here when you record.'}
                       </p>
                     )}
