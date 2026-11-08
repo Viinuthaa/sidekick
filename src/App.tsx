@@ -3,6 +3,7 @@ import './App.css'
 import {
   startMeetingAudioCapture,
   type MeetingAudioCaptureController,
+  type MeetingAudioChunk,
 } from './lib/meetingAudioCapture'
 
 type Session = {
@@ -11,12 +12,13 @@ type Session = {
   createdAt: string
   notes?: string
   transcript?: string
-  transcriptEntries?: { id: string; time: string; text: string }[]
+  transcriptEntries?: { id: string; time: string; text: string; source?: 'you' | 'others' | 'unknown' }[]
 }
 
 type Page = 'home' | 'sessions' | 'takeaways'
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/$/, '')
+const WS_BASE_URL = API_BASE_URL.replace(/^http/, 'ws')
 
 type ApiMeeting = {
   id: number
@@ -31,6 +33,7 @@ type ApiTranscriptSegment = {
   meeting_id: number
   time: string
   text: string
+  source: 'you' | 'others' | 'unknown'
 }
 
 type MeetingSummary = {
@@ -131,7 +134,10 @@ function App() {
   const [isLoadingSessions, setIsLoadingSessions] = useState(true)
   const [apiError, setApiError] = useState('')
   const audioCaptureRef =
-  useRef<MeetingAudioCaptureController | null>(null)
+    useRef<MeetingAudioCaptureController | null>(null)
+  const transcriptionSocketRef = useRef<WebSocket | null>(null)
+  const pendingTranscriptionChunksRef = useRef(0)
+  const closeSocketAfterPendingRef = useRef(false)
 
   const captureGenerationRef = useRef(0)
   const notesSaveTimeoutRef =
@@ -160,6 +166,12 @@ function App() {
 
     if (capture) {
       void capture.stop()
+    }
+
+    const socket = transcriptionSocketRef.current
+    transcriptionSocketRef.current = null
+    if (socket && socket.readyState < WebSocket.CLOSING) {
+      socket.close(1000, 'Component unmounted')
     }
 
     if (notesSaveTimeoutRef.current) {
@@ -230,90 +242,249 @@ function App() {
     }
   }
 
-  async function startTranscription() {
-  if (!activeSession) return
+  function closeTranscriptionSocketWhenIdle() {
+    if (!closeSocketAfterPendingRef.current) return
+    if (pendingTranscriptionChunksRef.current > 0) return
 
-  const attempt = ++captureGenerationRef.current
+    const socket = transcriptionSocketRef.current
+    transcriptionSocketRef.current = null
+    closeSocketAfterPendingRef.current = false
 
-  setTranscriptionError('')
-  setCapturedChunkCount(0)
-  setTranscriptionStatus('starting')
+    if (socket && socket.readyState < WebSocket.CLOSING) {
+      socket.close(1000, 'Recording stopped')
+    }
+  }
 
-  try {
-    const capture = await startMeetingAudioCapture({
-      onChunk: (chunk) => {
-        console.info(
-          `[Sidekick] ${chunk.source} audio chunk captured`,
-          {
-            size: chunk.blob.size,
-            mimeType: chunk.mimeType,
-            capturedAt: chunk.capturedAt,
-          },
-        )
+  function handleTranscriptionMessage(event: MessageEvent) {
+    let message: {
+      type?: string
+      message?: string
+      segment?: ApiTranscriptSegment
+    }
 
-        setCapturedChunkCount((count) => count + 1)
-      },
-
-      onCaptureEnded: () => {
-        const currentCapture = audioCaptureRef.current
-        audioCaptureRef.current = null
-
-        if (currentCapture) {
-          void currentCapture.stop()
-        }
-
-        setTranscriptionStatus('error')
-        setTranscriptionError(
-          'The shared meeting audio or microphone stopped. Please start recording again.',
-        )
-      },
-
-      onError: (message) => {
-        setTranscriptionStatus('error')
-        setTranscriptionError(message)
-
-        const currentCapture = audioCaptureRef.current
-        audioCaptureRef.current = null
-
-        if (currentCapture) {
-          void currentCapture.stop()
-        }
-      },
-    })
-
-    // The user might have navigated away while granting permissions.
-    if (attempt !== captureGenerationRef.current) {
-      await capture.stop()
+    try {
+      message = JSON.parse(String(event.data)) as typeof message
+    } catch {
+      setTranscriptionStatus('error')
+      setTranscriptionError('The transcription server returned an unreadable response.')
       return
     }
 
-    audioCaptureRef.current = capture
-    setTranscriptionStatus('on')
-  } catch (error) {
-    if (attempt !== captureGenerationRef.current) return
+    if (message.type === 'transcript' && message.segment) {
+      const segment = message.segment
+      const entry = {
+        id: String(segment.id),
+        time: segment.time,
+        text: segment.text,
+        source: segment.source,
+      }
 
-    setTranscriptionStatus('error')
-    setTranscriptionError(
-      error instanceof Error
-        ? error.message
-        : 'Could not start meeting audio capture.',
-    )
+      setActiveSession((current) => {
+        if (!current || current.id !== segment.meeting_id) return current
+        return {
+          ...current,
+          transcriptEntries: [...(current.transcriptEntries ?? []), entry],
+        }
+      })
+
+      setSessions((current) => current.map((session) =>
+        session.id === segment.meeting_id
+          ? {
+              ...session,
+              transcriptEntries: [...(session.transcriptEntries ?? []), entry],
+            }
+          : session,
+      ))
+    }
+
+    if (message.type === 'transcript' || message.type === 'chunk_processed' || message.type === 'error') {
+      pendingTranscriptionChunksRef.current = Math.max(
+        0,
+        pendingTranscriptionChunksRef.current - 1,
+      )
+    }
+
+    if (message.type === 'error') {
+      setTranscriptionStatus('error')
+      setTranscriptionError(message.message || 'Audio transcription failed.')
+      closeSocketAfterPendingRef.current = true
+
+      const capture = audioCaptureRef.current
+      audioCaptureRef.current = null
+      if (capture) {
+        void capture.stop().finally(closeTranscriptionSocketWhenIdle)
+      }
+    }
+
+    closeTranscriptionSocketWhenIdle()
   }
-}
 
-function stopTranscription() {
-  captureGenerationRef.current += 1
+  async function startTranscription() {
+    if (!activeSession) return
 
-  const capture = audioCaptureRef.current
-  audioCaptureRef.current = null
+    const meetingId = activeSession.id
+    const attempt = ++captureGenerationRef.current
 
-  if (capture) {
-    void capture.stop()
+    setTranscriptionError('')
+    setCapturedChunkCount(0)
+    setTranscriptionStatus('starting')
+    pendingTranscriptionChunksRef.current = 0
+    closeSocketAfterPendingRef.current = false
+
+    let socket: WebSocket | null = null
+
+    try {
+      const activeSocket = new WebSocket(`${WS_BASE_URL}/api/meetings/${meetingId}/transcribe`)
+      socket = activeSocket
+      activeSocket.onmessage = handleTranscriptionMessage
+      transcriptionSocketRef.current = activeSocket
+
+      await new Promise<void>((resolve, reject) => {
+        let settled = false
+
+        activeSocket.addEventListener('open', () => {
+          settled = true
+          resolve()
+        }, { once: true })
+
+        activeSocket.addEventListener('error', () => {
+          if (!settled) {
+            settled = true
+            reject(new Error('Could not connect to the transcription service. Check that the backend is running.'))
+          }
+        }, { once: true })
+      })
+
+      activeSocket.onclose = () => {
+        if (transcriptionSocketRef.current === activeSocket) {
+          transcriptionSocketRef.current = null
+          if (audioCaptureRef.current) {
+            setTranscriptionStatus('error')
+            setTranscriptionError('The transcription connection closed unexpectedly. Please start recording again.')
+            const capture = audioCaptureRef.current
+            audioCaptureRef.current = null
+            void capture.stop()
+          }
+        }
+      }
+
+      activeSocket.onerror = () => {
+        if (audioCaptureRef.current) {
+          setTranscriptionStatus('error')
+          setTranscriptionError('The transcription connection encountered an error.')
+        }
+      }
+
+      if (attempt !== captureGenerationRef.current) {
+        closeSocketAfterPendingRef.current = true
+        closeTranscriptionSocketWhenIdle()
+        return
+      }
+
+      const capture = await startMeetingAudioCapture({
+        onChunk: (chunk: MeetingAudioChunk) => {
+          const currentSocket = transcriptionSocketRef.current
+          if (!currentSocket || currentSocket.readyState !== WebSocket.OPEN) {
+            setTranscriptionStatus('error')
+            setTranscriptionError('Audio was captured, but the transcription connection is unavailable.')
+            return
+          }
+
+          const time = new Date(chunk.capturedAt).toLocaleTimeString([], {
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+          })
+
+          try {
+            pendingTranscriptionChunksRef.current += 1
+            currentSocket.send(JSON.stringify({
+              source: chunk.source,
+              mime_type: chunk.mimeType,
+              time,
+            }))
+            currentSocket.send(chunk.blob)
+            setCapturedChunkCount((count) => count + 1)
+          } catch (error) {
+            pendingTranscriptionChunksRef.current = Math.max(0, pendingTranscriptionChunksRef.current - 1)
+            setTranscriptionStatus('error')
+            setTranscriptionError(error instanceof Error ? error.message : 'Could not send an audio chunk.')
+          }
+        },
+        onCaptureEnded: () => {
+          const currentCapture = audioCaptureRef.current
+          audioCaptureRef.current = null
+          closeSocketAfterPendingRef.current = true
+
+          if (currentCapture) {
+            void currentCapture.stop().finally(closeTranscriptionSocketWhenIdle)
+          } else {
+            closeTranscriptionSocketWhenIdle()
+          }
+
+          setTranscriptionStatus('error')
+          setTranscriptionError('The shared meeting audio or microphone stopped. Please start recording again.')
+        },
+        onError: (message) => {
+          setTranscriptionStatus('error')
+          setTranscriptionError(message)
+          closeSocketAfterPendingRef.current = true
+
+          const currentCapture = audioCaptureRef.current
+          audioCaptureRef.current = null
+          if (currentCapture) {
+            void currentCapture.stop().finally(closeTranscriptionSocketWhenIdle)
+          } else {
+            closeTranscriptionSocketWhenIdle()
+          }
+        },
+      })
+
+      if (attempt !== captureGenerationRef.current) {
+        await capture.stop()
+        closeSocketAfterPendingRef.current = true
+        closeTranscriptionSocketWhenIdle()
+        return
+      }
+
+      audioCaptureRef.current = capture
+      setTranscriptionStatus('on')
+    } catch (error) {
+      if (attempt !== captureGenerationRef.current) return
+
+      closeSocketAfterPendingRef.current = true
+      if (socket && socket.readyState < WebSocket.CLOSING) {
+        socket.close()
+      }
+      if (transcriptionSocketRef.current === socket) {
+        transcriptionSocketRef.current = null
+      }
+
+      setTranscriptionStatus('error')
+      setTranscriptionError(
+        error instanceof Error
+          ? error.message
+          : 'Could not start meeting audio capture.',
+      )
+    }
   }
 
-  setTranscriptionStatus('off')
-  setTranscriptionError('')
-}
+  function stopTranscription() {
+    captureGenerationRef.current += 1
+
+    const capture = audioCaptureRef.current
+    audioCaptureRef.current = null
+    closeSocketAfterPendingRef.current = true
+
+    if (capture) {
+      void capture.stop().finally(closeTranscriptionSocketWhenIdle)
+    } else {
+      closeTranscriptionSocketWhenIdle()
+    }
+
+    setTranscriptionStatus('off')
+    setTranscriptionError('')
+  }
   async function deleteSession(id: number) {
     try {
       setApiError('')
@@ -403,6 +574,7 @@ function stopTranscription() {
         id: String(segment.id),
         time: segment.time,
         text: segment.text,
+        source: segment.source,
       }))
 
       setSessions((current) =>
@@ -754,16 +926,27 @@ function stopTranscription() {
                         <div className="transcript-entry-list">
                           {visibleTranscriptEntries.map((entry) => (
                             <article
-                              className="transcript-entry"
-                              key={entry.id}
-                            >
-                              <time className="transcript-time">
-                                {entry.time}
-                              </time>
-                              <p className="transcript-entry-text">
-                                {entry.text}
-                              </p>
-                            </article>
+  className="transcript-entry"
+  key={entry.id}
+>
+  <div className="transcript-meta">
+    <span className={`transcript-speaker ${entry.source}`}>
+      {entry.source === 'you'
+        ? 'You'
+        : entry.source === 'others'
+          ? 'Others'
+          : 'Speaker'}
+    </span>
+
+    <time className="transcript-time">
+      {entry.time}
+    </time>
+  </div>
+
+  <p className="transcript-entry-text">
+    {entry.text}
+  </p>
+</article>
                           ))}
                         </div>
                       ) : (
@@ -774,24 +957,35 @@ function stopTranscription() {
                       )
                     ) : transcriptEntries.length > 0 ? (
                       <div className="transcript-entry-list">
-                        {transcriptEntries.map((entry) => (
-                          <article
-                            className="transcript-entry"
-                            key={entry.id}
-                          >
-                            <time className="transcript-time">
-                              {entry.time}
-                            </time>
-                            <p className="transcript-entry-text">
-                              {entry.text}
-                            </p>
-                          </article>
-                        ))}
-                      </div>
+  {transcriptEntries.map((entry) => (
+    <article
+  className="transcript-entry"
+  key={entry.id}
+>
+  <div className="transcript-meta">
+    <span className={`transcript-speaker ${entry.source}`}>
+      {entry.source === 'you'
+        ? 'You'
+        : entry.source === 'others'
+          ? 'Others'
+          : 'Speaker'}
+    </span>
+
+    <time className="transcript-time">
+      {entry.time}
+    </time>
+  </div>
+
+  <p className="transcript-entry-text">
+    {entry.text}
+  </p>
+</article>
+  ))}
+</div>
                     ) : (
                       <p>
                         {isRecording
-                          ? 'Audio capture is active. Live transcription will be connected in the next commit.'
+                          ? 'Live transcription is active. Your audio is being processed.'
                           : 'Your transcript will appear here when you record.'}
                       </p>
                     )}

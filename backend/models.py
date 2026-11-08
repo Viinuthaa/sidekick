@@ -1,4 +1,3 @@
-
 from datetime import datetime
 
 from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
@@ -35,6 +34,12 @@ class TranscriptSegment(Base):
 
     time: Mapped[str] = mapped_column(String(30), nullable=False)
     text: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(
+        String(20),
+        default="unknown",
+        server_default="unknown",
+        nullable=False,
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime,

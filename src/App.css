@@ -2784,3 +2784,28 @@ button {
     grid-column: 2;
   }
 }
+.capture-chunk-status {
+  margin: 10px 0 0;
+  color: #8b745f;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.capture-notice {
+  margin: 12px 0 0;
+  padding: 12px 14px;
+  border-left: 2px solid #c6a47f;
+  background: #f5efe5;
+  color: #806e5e;
+  font-size: 11px;
+  line-height: 1.7;
+}
+.transcript-speaker {
+  display: inline-block;
+  margin-right: 0.55rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  opacity: 0.72;
+}

@@ -1,4 +1,4 @@
-
+import asyncio
 import json
 import logging
 import os
@@ -7,11 +7,11 @@ from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 from groq import APIError, Groq
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import delete, select
+from sqlalchemy import delete, inspect, select
 from sqlalchemy.orm import Session
 
 import models
@@ -28,6 +28,19 @@ logger = logging.getLogger("sidekick")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
+
+    
+    columns = {
+        column["name"]
+        for column in inspect(engine).get_columns("transcript_segments")
+    }
+    if "source" not in columns:
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                "ALTER TABLE transcript_segments "
+                "ADD COLUMN source VARCHAR(20) NOT NULL DEFAULT 'unknown'"
+            )
+
     yield
 
 
@@ -91,6 +104,7 @@ class MeetingResponse(BaseModel):
 class TranscriptSegmentCreate(BaseModel):
     time: str = Field(min_length=1, max_length=30)
     text: str = Field(min_length=1)
+    source: str = Field(default="unknown", pattern="^(you|others|unknown)$")
 
 
 class TranscriptSegmentResponse(BaseModel):
@@ -98,6 +112,7 @@ class TranscriptSegmentResponse(BaseModel):
     meeting_id: int
     time: str
     text: str
+    source: str
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -259,6 +274,7 @@ def create_transcript_segment(
         meeting_id=meeting_id,
         time=segment_data.time,
         text=text,
+        source=segment_data.source,
     )
 
     existing_transcript = meeting.transcript.strip()
@@ -298,6 +314,238 @@ def list_transcript_segments(
 
 
 
+def transcribe_audio_chunk(
+    audio_bytes: bytes,
+    filename: str,
+    mime_type: str,
+) -> str:
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "GROQ_API_KEY is missing. Configure backend/.env."
+        )
+
+    model_name = os.getenv(
+        "GROQ_TRANSCRIPTION_MODEL",
+        "whisper-large-v3-turbo",
+    )
+
+    client = Groq(api_key=api_key)
+
+    result = client.audio.transcriptions.create(
+        file=(filename, audio_bytes, mime_type),
+        model=model_name,
+        response_format="verbose_json",
+        language="en",
+        temperature=0.0,
+    )
+
+    segments = getattr(result, "segments", None)
+
+    logger.info(
+        "Groq raw: text_chars=%d, segments=%d, text=%.200r",
+        len((getattr(result, "text", "") or "").strip()),
+        len(segments or []),
+        (getattr(result, "text", "") or "").strip()[:200],
+    )
+
+    if not segments:
+        return (result.text or "").strip()
+
+    accepted_parts = []
+    rejected_reasons = []
+
+    for seg in segments:
+        text = str(getattr(seg, "text", "") or "").strip()
+        if not text:
+            continue
+
+        nsp = float(getattr(seg, "no_speech_prob", 0.0) or 0.0)
+        alp = float(getattr(seg, "avg_logprob", 0.0) or 0.0)
+        cr = float(getattr(seg, "compression_ratio", 0.0) or 0.0)
+
+        if nsp >= 0.60:
+            rejected_reasons.append(
+                "no_speech=%.2f text=%r" % (nsp, text[:60])
+            )
+            continue
+
+        if alp < -1.0:
+            rejected_reasons.append(
+                "avg_logprob=%.2f text=%r" % (alp, text[:60])
+            )
+            continue
+
+        if cr > 2.4:
+            rejected_reasons.append(
+                "compression=%.2f text=%r" % (cr, text[:60])
+            )
+            continue
+
+        accepted_parts.append(text)
+
+    final_text = " ".join(accepted_parts).strip()
+
+    logger.info(
+        "Groq result: accepted=%d, rejected=%d, chars=%d",
+        len(accepted_parts),
+        len(rejected_reasons),
+        len(final_text),
+    )
+    for reason in rejected_reasons:
+        logger.info("  rejected: %s", reason)
+
+    return final_text
+
+
+@app.websocket("/api/meetings/{meeting_id}/transcribe")
+async def transcribe_meeting_audio(
+    websocket: WebSocket,
+    meeting_id: int,
+):
+    await websocket.accept()
+
+    if not os.getenv("GROQ_API_KEY"):
+        await websocket.send_json({
+            "type": "error",
+            "message": "GROQ_API_KEY is missing. Configure backend/.env.",
+        })
+        await websocket.close(code=1011)
+        return
+
+    try:
+        while True:
+            metadata = await websocket.receive_json()
+
+            if not isinstance(metadata, dict):
+                await websocket.send_json({
+                    "type": "error",
+                    "message": "Invalid audio-chunk metadata.",
+                })
+                continue
+
+            source = metadata.get("source")
+            if source not in {"you", "others"}:
+                await websocket.send_json({
+                    "type": "error",
+                    "message": "Audio source must be 'you' or 'others'.",
+                })
+                continue
+
+            mime_type = str(metadata.get("mime_type") or "audio/webm")
+            mime_type = mime_type.split(";", 1)[0].strip().lower()
+            extension_by_type = {
+                "audio/webm": "webm",
+                "audio/mp4": "mp4",
+                "audio/m4a": "m4a",
+                "audio/wav": "wav",
+                "audio/mpeg": "mp3",
+                "audio/mp3": "mp3",
+                "audio/ogg": "ogg",
+                "audio/flac": "flac",
+            }
+            extension = extension_by_type.get(mime_type)
+            if extension is None:
+                await websocket.send_json({
+                    "type": "error",
+                    "message": f"Unsupported audio format: {mime_type}.",
+                })
+                continue
+
+            audio_bytes = await websocket.receive_bytes()
+            if not audio_bytes:
+                continue
+            if len(audio_bytes) > 25 * 1024 * 1024:
+                await websocket.send_json({
+                    "type": "error",
+                    "message": "Audio chunk exceeds the 25 MB upload limit.",
+                })
+                continue
+
+            try:
+                transcript_text = await asyncio.to_thread(
+                    transcribe_audio_chunk,
+                    audio_bytes,
+                    f"sidekick_chunk.{extension}",
+                    mime_type,
+                )
+            except Exception as error:
+                logger.exception(
+                    "Audio transcription failed for meeting %s.",
+                    meeting_id,
+                )
+                await websocket.send_json({
+                    "type": "error",
+                    "message": (
+                        f"Audio transcription failed ({type(error).__name__}). "
+                        "Check the backend terminal and Groq configuration."
+                    ),
+                })
+                continue
+
+            if not transcript_text:
+                await websocket.send_json({
+                    "type": "chunk_processed",
+                    "source": source,
+                    "text": "",
+                })
+                continue
+
+            time_label = str(metadata.get("time") or datetime.now().strftime("%H:%M:%S"))
+            if len(time_label) > 30:
+                time_label = time_label[:30]
+
+            db = SessionLocal()
+            try:
+                meeting = db.get(models.Meeting, meeting_id)
+                if meeting is None:
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": "Meeting not found.",
+                    })
+                    await websocket.close(code=1008)
+                    return
+
+                segment = models.TranscriptSegment(
+                    meeting_id=meeting_id,
+                    time=time_label,
+                    text=transcript_text,
+                    source=source,
+                )
+                existing_transcript = meeting.transcript.strip()
+                transcript_line = f"{source}: {transcript_text}"
+                meeting.transcript = (
+                    f"{existing_transcript}\\n{transcript_line}"
+                    if existing_transcript
+                    else transcript_line
+                )
+                db.add(segment)
+                db.commit()
+                db.refresh(segment)
+
+                await websocket.send_json({
+                    "type": "transcript",
+                    "segment": {
+                        "id": segment.id,
+                        "meeting_id": segment.meeting_id,
+                        "time": segment.time,
+                        "text": segment.text,
+                        "source": segment.source,
+                    },
+                })
+            finally:
+                db.close()
+
+    except WebSocketDisconnect:
+        logger.info("Transcription WebSocket disconnected for meeting %s.", meeting_id)
+    except Exception:
+        logger.exception("Unexpected WebSocket error for meeting %s.", meeting_id)
+        try:
+            await websocket.close(code=1011)
+        except Exception:
+            pass
+
+
 @app.post(
     "/api/meetings/{meeting_id}/summary",
     response_model=MeetingSummaryResponse,
@@ -329,7 +577,7 @@ def generate_meeting_summary(
 
     if segments:
         transcript = "\n".join(
-            f"[{segment.time}] {segment.text}" for segment in segments
+            f"[{segment.time}] {segment.source}: {segment.text}" for segment in segments
         )
     else:
         transcript = meeting.transcript.strip()
