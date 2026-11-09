@@ -18,7 +18,6 @@ import models
 from database import Base, SessionLocal, engine
 
 
-
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
 logging.basicConfig(level=logging.INFO)
@@ -29,7 +28,6 @@ logger = logging.getLogger("sidekick")
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
 
-    
     columns = {
         column["name"]
         for column in inspect(engine).get_columns("transcript_segments")
@@ -69,14 +67,12 @@ app.add_middleware(
 )
 
 
-
 def get_db():
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
-
 
 
 class MeetingCreate(BaseModel):
@@ -126,7 +122,6 @@ class MeetingSummaryResponse(BaseModel):
     action_items: list[str]
 
 
-
 @app.get("/")
 def root():
     return {
@@ -145,8 +140,6 @@ def health_check():
 def database_health_check(db: Session = Depends(get_db)):
     db.execute(select(1))
     return {"status": "ok", "database": "connected"}
-
-
 
 
 @app.post(
@@ -246,7 +239,6 @@ def delete_meeting(meeting_id: int, db: Session = Depends(get_db)):
     db.commit()
 
 
-
 @app.post(
     "/api/meetings/{meeting_id}/segments",
     response_model=TranscriptSegmentResponse,
@@ -277,7 +269,7 @@ def create_transcript_segment(
         source=segment_data.source,
     )
 
-    existing_transcript = meeting.transcript.strip()
+    existing_transcript = (meeting.transcript or "").strip()
     meeting.transcript = (
         f"{existing_transcript} {text}"
         if existing_transcript
@@ -312,6 +304,10 @@ def list_transcript_segments(
     return db.scalars(statement).all()
 
 
+def _get_val(obj, key, default=None):
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
 
 
 def transcribe_audio_chunk(
@@ -340,51 +336,54 @@ def transcribe_audio_chunk(
         temperature=0.0,
     )
 
-    segments = getattr(result, "segments", None)
+    raw_text = str(_get_val(result, "text", "") or "").strip()
+    segments = _get_val(result, "segments", None)
 
     logger.info(
         "Groq raw: text_chars=%d, segments=%d, text=%.200r",
-        len((getattr(result, "text", "") or "").strip()),
+        len(raw_text),
         len(segments or []),
-        (getattr(result, "text", "") or "").strip()[:200],
+        raw_text[:200],
     )
 
+    hallucinations = {"thank you.", "thank you", "...", ".", "so", "you"}
+    if raw_text.lower() in hallucinations:
+        logger.info("Discarded common Whisper hallucination: %r", raw_text)
+        return ""
+
     if not segments:
-        return (result.text or "").strip()
+        return raw_text
 
     accepted_parts = []
     rejected_reasons = []
 
     for seg in segments:
-        text = str(getattr(seg, "text", "") or "").strip()
-        if not text:
+        text = str(_get_val(seg, "text", "") or "").strip()
+        if not text or text.lower() in hallucinations:
             continue
 
-        nsp = float(getattr(seg, "no_speech_prob", 0.0) or 0.0)
-        alp = float(getattr(seg, "avg_logprob", 0.0) or 0.0)
-        cr = float(getattr(seg, "compression_ratio", 0.0) or 0.0)
+        nsp = float(_get_val(seg, "no_speech_prob", 0.0) or 0.0)
+        alp = float(_get_val(seg, "avg_logprob", 0.0) or 0.0)
+        cr = float(_get_val(seg, "compression_ratio", 0.0) or 0.0)
 
-        if nsp >= 0.60:
-            rejected_reasons.append(
-                "no_speech=%.2f text=%r" % (nsp, text[:60])
-            )
+        if nsp >= 0.85:
+            rejected_reasons.append(f"no_speech={nsp:.2f} text={text[:60]!r}")
             continue
 
-        if alp < -1.0:
-            rejected_reasons.append(
-                "avg_logprob=%.2f text=%r" % (alp, text[:60])
-            )
+        if alp < -1.2:
+            rejected_reasons.append(f"avg_logprob={alp:.2f} text={text[:60]!r}")
             continue
 
-        if cr > 2.4:
-            rejected_reasons.append(
-                "compression=%.2f text=%r" % (cr, text[:60])
-            )
+        if cr > 2.6:
+            rejected_reasons.append(f"compression={cr:.2f} text={text[:60]!r}")
             continue
 
         accepted_parts.append(text)
 
     final_text = " ".join(accepted_parts).strip()
+
+    if not final_text and len(raw_text) > 5 and raw_text.lower() not in hallucinations:
+        final_text = raw_text
 
     logger.info(
         "Groq result: accepted=%d, rejected=%d, chars=%d",
@@ -512,10 +511,10 @@ async def transcribe_meeting_audio(
                     text=transcript_text,
                     source=source,
                 )
-                existing_transcript = meeting.transcript.strip()
+                existing_transcript = (meeting.transcript or "").strip()
                 transcript_line = f"{source}: {transcript_text}"
                 meeting.transcript = (
-                    f"{existing_transcript}\\n{transcript_line}"
+                    f"{existing_transcript}\n{transcript_line}"
                     if existing_transcript
                     else transcript_line
                 )
@@ -532,6 +531,13 @@ async def transcribe_meeting_audio(
                         "text": segment.text,
                         "source": segment.source,
                     },
+                })
+            except Exception as db_err:
+                db.rollback()
+                logger.exception("Failed to persist transcript segment to database.")
+                await websocket.send_json({
+                    "type": "error",
+                    "message": f"Database error saving segment: {str(db_err)}",
                 })
             finally:
                 db.close()
@@ -580,7 +586,7 @@ def generate_meeting_summary(
             f"[{segment.time}] {segment.source}: {segment.text}" for segment in segments
         )
     else:
-        transcript = meeting.transcript.strip()
+        transcript = (meeting.transcript or "").strip()
 
     if not transcript:
         raise HTTPException(

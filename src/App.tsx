@@ -158,27 +158,27 @@ function App() {
   )
 
   useEffect(() => {
-   return () => {
-    captureGenerationRef.current += 1
+    return () => {
+      captureGenerationRef.current += 1
 
-    const capture = audioCaptureRef.current
-    audioCaptureRef.current = null
+      const capture = audioCaptureRef.current
+      audioCaptureRef.current = null
 
-    if (capture) {
-      void capture.stop()
+      if (capture) {
+        void capture.stop()
+      }
+
+      const socket = transcriptionSocketRef.current
+      transcriptionSocketRef.current = null
+      if (socket && socket.readyState < WebSocket.CLOSING) {
+        socket.close(1000, 'Component unmounted')
+      }
+
+      if (notesSaveTimeoutRef.current) {
+        clearTimeout(notesSaveTimeoutRef.current)
+      }
     }
-
-    const socket = transcriptionSocketRef.current
-    transcriptionSocketRef.current = null
-    if (socket && socket.readyState < WebSocket.CLOSING) {
-      socket.close(1000, 'Component unmounted')
-    }
-
-    if (notesSaveTimeoutRef.current) {
-      clearTimeout(notesSaveTimeoutRef.current)
-    }
-  }
-}, [])
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -264,6 +264,7 @@ function App() {
 
     try {
       message = JSON.parse(String(event.data)) as typeof message
+      console.log('WS message received:', message)
     } catch {
       setTranscriptionStatus('error')
       setTranscriptionError('The transcription server returned an unreadable response.')
@@ -280,7 +281,7 @@ function App() {
       }
 
       setActiveSession((current) => {
-        if (!current || current.id !== segment.meeting_id) return current
+        if (!current || Number(current.id) !== Number(segment.meeting_id)) return current
         return {
           ...current,
           transcriptEntries: [...(current.transcriptEntries ?? []), entry],
@@ -288,7 +289,7 @@ function App() {
       })
 
       setSessions((current) => current.map((session) =>
-        session.id === segment.meeting_id
+        Number(session.id) === Number(segment.meeting_id)
           ? {
               ...session,
               transcriptEntries: [...(session.transcriptEntries ?? []), entry],
@@ -485,6 +486,7 @@ function App() {
     setTranscriptionStatus('off')
     setTranscriptionError('')
   }
+
   async function deleteSession(id: number) {
     try {
       setApiError('')
@@ -667,7 +669,6 @@ function App() {
             Your takeaways
           </button>
         </nav>
-
       </aside>
 
       <main className="page">
@@ -680,19 +681,19 @@ function App() {
               openPage('home')
             }}
           >
-           <svg
-            className="brand-wave"
-            viewBox="0 0 32 32"
-            fill="none"
-            aria-hidden="true"
-           >
-            <path d="M5 13V19" />
-            <path d="M11 8V24" />
-            <path d="M16 4V28" />
-            <path d="M21 10V22" />
-            <path d="M27 13V19" />
-           </svg>
-           <span>sidekick</span>
+            <svg
+              className="brand-wave"
+              viewBox="0 0 32 32"
+              fill="none"
+              aria-hidden="true"
+            >
+              <path d="M5 13V19" />
+              <path d="M11 8V24" />
+              <path d="M16 4V28" />
+              <path d="M21 10V22" />
+              <path d="M27 13V19" />
+            </svg>
+            <span>sidekick</span>
           </a>
 
           <span className="availability">
@@ -844,7 +845,16 @@ function App() {
                     </button>
                   </div>
 
-                  <div className={`recording-status ${isRecording ? 'is-recording' : transcriptionStatus === 'error' ? 'has-error' : ''}`} role="status">
+                  <div
+                    className={`recording-status ${
+                      isRecording
+                        ? 'is-recording'
+                        : transcriptionStatus === 'error'
+                          ? 'has-error'
+                          : ''
+                    }`}
+                    role="status"
+                  >
                     <span className="recording-status-dot" />
                     {transcriptionStatus === 'starting'
                       ? 'Requesting microphone and meeting-tab access'
@@ -855,16 +865,16 @@ function App() {
                           : 'Not recording'}
                   </div>
                   {isRecording && (
-  <p className="capture-chunk-status">
-    Audio chunks captured: {capturedChunkCount}
-  </p>
-)}
+                    <p className="capture-chunk-status">
+                      Audio chunks captured: {capturedChunkCount}
+                    </p>
+                  )}
 
-<p className="capture-notice">
-  Sidekick captures audio from your selected browser tab and microphone.
-  Make sure everyone has agreed to be recorded. Headphones are recommended
-  to reduce echo.
-</p>
+                  <p className="capture-notice">
+                    Sidekick captures audio from your selected browser tab and microphone.
+                    Make sure everyone has agreed to be recorded. Headphones are recommended
+                    to reduce echo.
+                  </p>
 
                   {microphoneError && (
                     <p className="microphone-error" role="alert">
@@ -926,27 +936,27 @@ function App() {
                         <div className="transcript-entry-list">
                           {visibleTranscriptEntries.map((entry) => (
                             <article
-  className="transcript-entry"
-  key={entry.id}
->
-  <div className="transcript-meta">
-    <span className={`transcript-speaker ${entry.source}`}>
-      {entry.source === 'you'
-        ? 'You'
-        : entry.source === 'others'
-          ? 'Others'
-          : 'Speaker'}
-    </span>
+                              className="transcript-entry"
+                              key={entry.id}
+                            >
+                              <div className="transcript-meta">
+                                <span className={`transcript-speaker ${entry.source}`}>
+                                  {entry.source === 'you'
+                                    ? 'You'
+                                    : entry.source === 'others'
+                                      ? 'Others'
+                                      : 'Speaker'}
+                                </span>
 
-    <time className="transcript-time">
-      {entry.time}
-    </time>
-  </div>
+                                <time className="transcript-time">
+                                  {entry.time}
+                                </time>
+                              </div>
 
-  <p className="transcript-entry-text">
-    {entry.text}
-  </p>
-</article>
+                              <p className="transcript-entry-text">
+                                {entry.text}
+                              </p>
+                            </article>
                           ))}
                         </div>
                       ) : (
@@ -957,31 +967,31 @@ function App() {
                       )
                     ) : transcriptEntries.length > 0 ? (
                       <div className="transcript-entry-list">
-  {transcriptEntries.map((entry) => (
-    <article
-  className="transcript-entry"
-  key={entry.id}
->
-  <div className="transcript-meta">
-    <span className={`transcript-speaker ${entry.source}`}>
-      {entry.source === 'you'
-        ? 'You'
-        : entry.source === 'others'
-          ? 'Others'
-          : 'Speaker'}
-    </span>
+                        {transcriptEntries.map((entry) => (
+                          <article
+                            className="transcript-entry"
+                            key={entry.id}
+                          >
+                            <div className="transcript-meta">
+                              <span className={`transcript-speaker ${entry.source}`}>
+                                {entry.source === 'you'
+                                  ? 'You'
+                                  : entry.source === 'others'
+                                    ? 'Others'
+                                    : 'Speaker'}
+                              </span>
 
-    <time className="transcript-time">
-      {entry.time}
-    </time>
-  </div>
+                              <time className="transcript-time">
+                                {entry.time}
+                              </time>
+                            </div>
 
-  <p className="transcript-entry-text">
-    {entry.text}
-  </p>
-</article>
-  ))}
-</div>
+                            <p className="transcript-entry-text">
+                              {entry.text}
+                            </p>
+                          </article>
+                        ))}
+                      </div>
                     ) : (
                       <p>
                         {isRecording
