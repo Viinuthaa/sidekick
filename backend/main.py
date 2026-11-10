@@ -411,7 +411,7 @@ def compute_rolling_notes(transcript_text: str, meeting_title: str) -> dict:
     if not api_key or not transcript_text.strip():
         return {"summary": "", "key_points": [], "decisions": [], "action_items": []}
 
-    model_name = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+    model_name = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
     client = Groq(api_key=api_key)
 
     try:
@@ -532,7 +532,7 @@ def ask_meeting_question(
     if not api_key:
         raise HTTPException(status_code=503, detail="GROQ_API_KEY is missing.")
 
-    model_name = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+    model_name = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
     client = Groq(api_key=api_key)
 
     try:
@@ -782,7 +782,7 @@ def generate_meeting_summary(
         raise HTTPException(status_code=404, detail="Meeting not found.")
 
     api_key = os.getenv("GROQ_API_KEY")
-    model_name = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+    model_name = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 
     if not api_key:
         raise HTTPException(
