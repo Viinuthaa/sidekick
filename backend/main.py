@@ -64,10 +64,11 @@ app = FastAPI(
 allowed_origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
+    "https://sidekick-live.vercel.app",
 ]
 
 frontend_url = os.getenv("FRONTEND_URL")
-if frontend_url:
+if frontend_url and frontend_url.rstrip("/") not in allowed_origins:
     allowed_origins.append(frontend_url.rstrip("/"))
 
 app.add_middleware(
@@ -376,24 +377,14 @@ def transcribe_audio_chunk(
     raw_text = str(_get_val(result, "text", "") or "").strip()
     segments = _get_val(result, "segments", None)
 
-    logger.info(
-        "Groq raw: text_chars=%d, segments=%d, text=%.200r",
-        len(raw_text),
-        len(segments or []),
-        raw_text[:200],
-    )
-
     hallucinations = {"thank you.", "thank you", "...", ".", "so", "you"}
     if raw_text.lower() in hallucinations:
-        logger.info("Discarded common Whisper hallucination: %r", raw_text)
         return ""
 
     if not segments:
         return raw_text
 
     accepted_parts = []
-    rejected_reasons = []
-
     for seg in segments:
         text = str(_get_val(seg, "text", "") or "").strip()
         if not text or text.lower() in hallucinations:
@@ -403,33 +394,14 @@ def transcribe_audio_chunk(
         alp = float(_get_val(seg, "avg_logprob", 0.0) or 0.0)
         cr = float(_get_val(seg, "compression_ratio", 0.0) or 0.0)
 
-        if nsp >= 0.85:
-            rejected_reasons.append(f"no_speech={nsp:.2f} text={text[:60]!r}")
-            continue
-
-        if alp < -1.2:
-            rejected_reasons.append(f"avg_logprob={alp:.2f} text={text[:60]!r}")
-            continue
-
-        if cr > 2.6:
-            rejected_reasons.append(f"compression={cr:.2f} text={text[:60]!r}")
+        if nsp >= 0.85 or alp < -1.2 or cr > 2.6:
             continue
 
         accepted_parts.append(text)
 
     final_text = " ".join(accepted_parts).strip()
-
     if not final_text and len(raw_text) > 5 and raw_text.lower() not in hallucinations:
         final_text = raw_text
-
-    logger.info(
-        "Groq result: accepted=%d, rejected=%d, chars=%d",
-        len(accepted_parts),
-        len(rejected_reasons),
-        len(final_text),
-    )
-    for reason in rejected_reasons:
-        logger.info("  rejected: %s", reason)
 
     return final_text
 
@@ -439,35 +411,35 @@ def compute_rolling_notes(transcript_text: str, meeting_title: str) -> dict:
     if not api_key or not transcript_text.strip():
         return {"summary": "", "key_points": [], "decisions": [], "action_items": []}
 
-    model_name = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+    model_name = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
     client = Groq(api_key=api_key)
 
-    response = client.chat.completions.create(
-        model=model_name,
-        response_format={"type": "json_object"},
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are Sidekick, an executive meeting assistant. "
-                    "Analyze the conversation transcript provided and generate concise, structured live notes. "
-                    "Respond with a single JSON object containing: "
-                    "'summary' (short 2-sentence overview), "
-                    "'key_points' (array of brief bullet strings), "
-                    "'decisions' (array of decisions reached, empty if none), "
-                    "'action_items' (array of actionable tasks or next steps, empty if none). "
-                    "Only include facts present in the transcript. Do not fabricate."
-                ),
-            },
-            {
-                "role": "user",
-                "content": f"Meeting Title: {meeting_title}\n\nTranscript:\n{transcript_text[-12000:]}",
-            },
-        ],
-    )
-
-    content = response.choices[0].message.content or "{}"
     try:
+        response = client.chat.completions.create(
+            model=model_name,
+            response_format={"type": "json_object"},
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are Sidekick, an executive meeting assistant. "
+                        "Analyze the conversation transcript provided and generate concise, structured live notes. "
+                        "Respond with a single JSON object containing: "
+                        "'summary' (short 2-sentence overview), "
+                        "'key_points' (array of brief bullet strings), "
+                        "'decisions' (array of decisions reached, empty if none), "
+                        "'action_items' (array of actionable tasks or next steps, empty if none). "
+                        "Only include facts present in the transcript. Do not fabricate."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"Meeting Title: {meeting_title}\n\nTranscript:\n{transcript_text[-12000:]}",
+                },
+            ],
+        )
+
+        content = response.choices[0].message.content or "{}"
         data = json.loads(content)
         return {
             "summary": str(data.get("summary") or ""),
@@ -475,8 +447,14 @@ def compute_rolling_notes(transcript_text: str, meeting_title: str) -> dict:
             "decisions": [str(x) for x in data.get("decisions") or [] if isinstance(x, str)],
             "action_items": [str(x) for x in data.get("action_items") or [] if isinstance(x, str)],
         }
-    except Exception:
-        return {"summary": "", "key_points": [], "decisions": [], "action_items": []}
+    except Exception as err:
+        logger.exception("Failed to generate rolling notes: %s", err)
+        return {
+            "summary": "Live notes will update as conversation continues.",
+            "key_points": [],
+            "decisions": [],
+            "action_items": [],
+        }
 
 
 @app.post("/api/meetings/{meeting_id}/ai-notes", response_model=AiNotesPayload)
@@ -554,7 +532,7 @@ def ask_meeting_question(
     if not api_key:
         raise HTTPException(status_code=503, detail="GROQ_API_KEY is missing.")
 
-    model_name = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+    model_name = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
     client = Groq(api_key=api_key)
 
     try:
@@ -580,7 +558,7 @@ def ask_meeting_question(
         )
         answer = response.choices[0].message.content or "No response could be generated."
     except Exception as err:
-        logger.exception("Chat question failed for meeting %d", meeting_id)
+        logger.exception("Chat question failed for meeting %d: %s", meeting_id, err)
         raise HTTPException(status_code=502, detail=f"Failed to generate answer: {str(err)}")
 
     chat_record = models.MeetingChatMessage(
@@ -669,10 +647,7 @@ async def transcribe_meeting_audio(
                     mime_type,
                 )
             except Exception as error:
-                logger.exception(
-                    "Audio transcription failed for meeting %s.",
-                    meeting_id,
-                )
+                logger.exception("Audio transcription failed for meeting %s.", meeting_id)
                 await websocket.send_json({
                     "type": "error",
                     "message": (
@@ -807,7 +782,7 @@ def generate_meeting_summary(
         raise HTTPException(status_code=404, detail="Meeting not found.")
 
     api_key = os.getenv("GROQ_API_KEY")
-    model_name = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+    model_name = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 
     if not api_key:
         raise HTTPException(
@@ -870,32 +845,17 @@ def generate_meeting_summary(
         )
 
     except APIError as error:
-        logger.exception(
-            "Groq API request failed. Error type: %s",
-            type(error).__name__,
-        )
-
+        logger.exception("Groq API request failed: %s", error)
         raise HTTPException(
             status_code=502,
-            detail=(
-                f"Groq request failed ({type(error).__name__}). "
-                "Check the backend terminal for details, your model "
-                "setting, and your account's rate limits."
-            ),
+            detail=f"Groq request failed ({type(error).__name__}). Check your model setting and rate limits.",
         ) from error
 
     except Exception as error:
-        logger.exception(
-            "Unexpected summary-generation error. Error type: %s",
-            type(error).__name__,
-        )
-
+        logger.exception("Unexpected summary-generation error: %s", error)
         raise HTTPException(
             status_code=502,
-            detail=(
-                "An unexpected error occurred while generating the summary. "
-                "Check the backend terminal."
-            ),
+            detail="An unexpected error occurred while generating the summary.",
         ) from error
 
     content = response.choices[0].message.content
@@ -927,7 +887,6 @@ def generate_meeting_summary(
 
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
         logger.exception("Groq returned an invalid summary response.")
-
         raise HTTPException(
             status_code=502,
             detail="Groq returned an invalid summary format.",
