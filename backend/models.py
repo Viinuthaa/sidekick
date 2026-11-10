@@ -13,6 +13,7 @@ class Meeting(Base):
     title: Mapped[str] = mapped_column(String(200), nullable=False)
     transcript: Mapped[str] = mapped_column(Text, default="", nullable=False)
     notes: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    ai_notes: Mapped[str] = mapped_column(Text, default="", nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
         server_default=func.now(),

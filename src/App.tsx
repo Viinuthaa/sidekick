@@ -6,11 +6,19 @@ import {
   type MeetingAudioChunk,
 } from './lib/meetingAudioCapture'
 
+type AiNotesData = {
+  summary: string
+  key_points: string[]
+  decisions: string[]
+  action_items: string[]
+}
+
 type Session = {
   id: number
   title: string
   createdAt: string
   notes?: string
+  aiNotes?: AiNotesData
   transcript?: string
   transcriptEntries?: { id: string; time: string; text: string; source?: 'you' | 'others' | 'unknown' }[]
 }
@@ -25,6 +33,7 @@ type ApiMeeting = {
   title: string
   transcript: string
   notes: string
+  ai_notes?: string
   created_at: string
 }
 
@@ -45,6 +54,21 @@ type MeetingSummary = {
   action_items: string[]
 }
 
+function parseAiNotes(rawJson?: string): AiNotesData | undefined {
+  if (!rawJson) return undefined
+  try {
+    const parsed = JSON.parse(rawJson)
+    return {
+      summary: String(parsed.summary || ''),
+      key_points: Array.isArray(parsed.key_points) ? parsed.key_points : [],
+      decisions: Array.isArray(parsed.decisions) ? parsed.decisions : [],
+      action_items: Array.isArray(parsed.action_items) ? parsed.action_items : [],
+    }
+  } catch {
+    return undefined
+  }
+}
+
 function toSession(meeting: ApiMeeting): Session {
   return {
     id: meeting.id,
@@ -56,6 +80,7 @@ function toSession(meeting: ApiMeeting): Session {
       minute: '2-digit',
     }),
     notes: meeting.notes ?? '',
+    aiNotes: parseAiNotes(meeting.ai_notes),
     transcript: meeting.transcript ?? '',
     transcriptEntries: [],
   }
@@ -105,7 +130,6 @@ async function apiRequest<T>(
         message = errorBody.message
       }
     } catch {
-      // The server did not return a readable JSON error body.
     }
 
     if (!message && response.status === 404) {
@@ -133,6 +157,9 @@ function App() {
   const [activeSession, setActiveSession] = useState<Session | null>(null)
   const [isLoadingSessions, setIsLoadingSessions] = useState(true)
   const [apiError, setApiError] = useState('')
+  const [activeNotesTab, setActiveNotesTab] = useState<'manual' | 'ai'>('manual')
+  const [isRefreshingAiNotes, setIsRefreshingAiNotes] = useState(false)
+
   const audioCaptureRef =
     useRef<MeetingAudioCaptureController | null>(null)
   const transcriptionSocketRef = useRef<WebSocket | null>(null)
@@ -230,6 +257,7 @@ function App() {
       setTranscriptSearch('')
       setTranscriptionStatus('off')
       setTranscriptionError('')
+      setActiveNotesTab('manual')
 
       return true
     } catch (error) {
@@ -260,11 +288,12 @@ function App() {
       type?: string
       message?: string
       segment?: ApiTranscriptSegment
+      meeting_id?: number
+      ai_notes?: AiNotesData
     }
 
     try {
       message = JSON.parse(String(event.data)) as typeof message
-      console.log('WS message received:', message)
     } catch {
       setTranscriptionStatus('error')
       setTranscriptionError('The transcription server returned an unreadable response.')
@@ -293,6 +322,28 @@ function App() {
           ? {
               ...session,
               transcriptEntries: [...(session.transcriptEntries ?? []), entry],
+            }
+          : session,
+      ))
+    }
+
+    if (message.type === 'ai_notes' && message.ai_notes && message.meeting_id) {
+      const targetMid = message.meeting_id
+      const freshNotes = message.ai_notes
+
+      setActiveSession((current) => {
+        if (!current || Number(current.id) !== Number(targetMid)) return current
+        return {
+          ...current,
+          aiNotes: freshNotes,
+        }
+      })
+
+      setSessions((current) => current.map((session) =>
+        Number(session.id) === Number(targetMid)
+          ? {
+              ...session,
+              aiNotes: freshNotes,
             }
           : session,
       ))
@@ -542,7 +593,6 @@ function App() {
           setApiError('')
         })
         .catch((error) => {
-          console.error('Could not save notes:', error)
           setApiError(
             error instanceof Error
               ? `Notes could not be saved: ${error.message}`
@@ -550,6 +600,32 @@ function App() {
           )
         })
     }, 500)
+  }
+
+  async function triggerRefreshAiNotes() {
+    if (!activeSession) return
+    setIsRefreshingAiNotes(true)
+
+    try {
+      const data = await apiRequest<AiNotesData>(
+        `/api/meetings/${activeSession.id}/ai-notes`,
+        { method: 'POST' },
+      )
+
+      setActiveSession((current) =>
+        current ? { ...current, aiNotes: data } : current,
+      )
+
+      setSessions((current) =>
+        current.map((s) => (s.id === activeSession.id ? { ...s, aiNotes: data } : s)),
+      )
+    } catch (err) {
+      setTranscriptionError(
+        err instanceof Error ? err.message : 'Could not refresh AI notes.',
+      )
+    } finally {
+      setIsRefreshingAiNotes(false)
+    }
   }
 
   function openPage(nextPage: Page) {
@@ -566,6 +642,7 @@ function App() {
     setActiveSession(session)
     setPage('home')
     setApiError('')
+    setActiveNotesTab('manual')
 
     try {
       const segments = await apiRequest<ApiTranscriptSegment[]>(
@@ -882,18 +959,107 @@ function App() {
                     </p>
                   )}
 
-                  <div className="meeting-notes">
-                    <label htmlFor="meeting-notes">Your notes</label>
-                    <textarea
-                      id="meeting-notes"
-                      className="meeting-notes-input"
-                      value={activeSession.notes}
-                      onChange={(event) =>
-                        updateNotes(event.target.value)
-                      }
-                      placeholder="Capture your thoughts here..."
-                    />
+                  <div className="notes-tabs-header">
+                    <button
+                      type="button"
+                      className={`notes-tab-button ${activeNotesTab === 'manual' ? 'selected' : ''}`}
+                      onClick={() => setActiveNotesTab('manual')}
+                    >
+                      Your notes
+                    </button>
+                    <button
+                      type="button"
+                      className={`notes-tab-button ${activeNotesTab === 'ai' ? 'selected' : ''}`}
+                      onClick={() => setActiveNotesTab('ai')}
+                    >
+                      AI Live Notes
+                      {activeSession.aiNotes?.key_points?.length ? (
+                        <span className="ai-badge">Ready</span>
+                      ) : null}
+                    </button>
+
+                    {activeNotesTab === 'ai' && (
+                      <button
+                        type="button"
+                        className="refresh-ai-btn"
+                        onClick={triggerRefreshAiNotes}
+                        disabled={isRefreshingAiNotes}
+                      >
+                        {isRefreshingAiNotes ? 'Generating…' : '↻ Refresh'}
+                      </button>
+                    )}
                   </div>
+
+                  {activeNotesTab === 'manual' ? (
+                    <div className="meeting-notes">
+                      <textarea
+                        id="meeting-notes"
+                        className="meeting-notes-input"
+                        value={activeSession.notes}
+                        onChange={(event) =>
+                          updateNotes(event.target.value)
+                        }
+                        placeholder="Capture your personal thoughts here..."
+                      />
+                    </div>
+                  ) : (
+                    <div className="ai-notes-panel">
+                      {activeSession.aiNotes ? (
+                        <>
+                          {activeSession.aiNotes.summary && (
+                            <div className="ai-note-block">
+                              <span className="ai-sublabel">OVERVIEW</span>
+                              <p className="ai-overview-text">{activeSession.aiNotes.summary}</p>
+                            </div>
+                          )}
+
+                          <div className="ai-note-block">
+                            <span className="ai-sublabel">KEY HIGHLIGHTS</span>
+                            {activeSession.aiNotes.key_points.length > 0 ? (
+                              <ul className="ai-bullets">
+                                {activeSession.aiNotes.key_points.map((pt, idx) => (
+                                  <li key={idx}>{pt}</li>
+                                ))}
+                              </ul>
+                            ) : (
+                              <p className="ai-dim-text">Listening for key points...</p>
+                            )}
+                          </div>
+
+                          <div className="ai-note-block">
+                            <span className="ai-sublabel">DECISIONS</span>
+                            {activeSession.aiNotes.decisions.length > 0 ? (
+                              <ul className="ai-bullets">
+                                {activeSession.aiNotes.decisions.map((dec, idx) => (
+                                  <li key={idx}>{dec}</li>
+                                ))}
+                              </ul>
+                            ) : (
+                              <p className="ai-dim-text">No explicit decisions identified yet.</p>
+                            )}
+                          </div>
+
+                          <div className="ai-note-block">
+                            <span className="ai-sublabel">ACTION ITEMS</span>
+                            {activeSession.aiNotes.action_items.length > 0 ? (
+                              <ul className="ai-bullets">
+                                {activeSession.aiNotes.action_items.map((act, idx) => (
+                                  <li key={idx}>{act}</li>
+                                ))}
+                              </ul>
+                            ) : (
+                              <p className="ai-dim-text">No action items detected yet.</p>
+                            )}
+                          </div>
+                        </>
+                      ) : (
+                        <div className="ai-empty-placeholder">
+                          <p>AI live notes automatically synthesize as conversation flows.</p>
+                          {isRecording && <p className="ai-dim-text">Analyzing transcript in background...</p>}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 <div className="meeting-panel">
@@ -1193,7 +1359,7 @@ function App() {
           className="modal-backdrop"
           onClick={(event) => {
             if (event.target === event.currentTarget) {
-              setShowSetup(false);
+              setShowSetup(false)
             }
           }}
         >
@@ -1219,15 +1385,15 @@ function App() {
 
             <form
               onSubmit={async (event) => {
-                event.preventDefault();
-                const formData = new FormData(event.currentTarget);
-                const title = String(formData.get('title') ?? '').trim();
+                event.preventDefault()
+                const formData = new FormData(event.currentTarget)
+                const title = String(formData.get('title') ?? '').trim()
 
-                if (!title) return;
+                if (!title) return
 
-                const created = await createSession(title);
+                const created = await createSession(title)
                 if (created) {
-                  setPage('home');
+                  setPage('home')
                 }
               }}
             >
@@ -1249,7 +1415,7 @@ function App() {
         </div>
       )}
     </div>
-  );
+  )
 }
 
-export default App;
+export default App

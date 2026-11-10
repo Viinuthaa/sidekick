@@ -17,7 +17,6 @@ from sqlalchemy.orm import Session
 import models
 from database import Base, SessionLocal, engine
 
-
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
 logging.basicConfig(level=logging.INFO)
@@ -28,15 +27,28 @@ logger = logging.getLogger("sidekick")
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
 
-    columns = {
+    inspector = inspect(engine)
+
+    segment_columns = {
         column["name"]
-        for column in inspect(engine).get_columns("transcript_segments")
+        for column in inspector.get_columns("transcript_segments")
     }
-    if "source" not in columns:
+    if "source" not in segment_columns:
         with engine.begin() as connection:
             connection.exec_driver_sql(
                 "ALTER TABLE transcript_segments "
                 "ADD COLUMN source VARCHAR(20) NOT NULL DEFAULT 'unknown'"
+            )
+
+    meeting_columns = {
+        column["name"]
+        for column in inspector.get_columns("meetings")
+    }
+    if "ai_notes" not in meeting_columns:
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                "ALTER TABLE meetings "
+                "ADD COLUMN ai_notes TEXT NOT NULL DEFAULT ''"
             )
 
     yield
@@ -45,7 +57,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Sidekick API",
     description="Backend API for the Sidekick meeting copilot.",
-    version="0.7.0",
+    version="0.8.0",
     lifespan=lifespan,
 )
 
@@ -79,12 +91,14 @@ class MeetingCreate(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     transcript: str = ""
     notes: str = ""
+    ai_notes: str = ""
 
 
 class MeetingUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=200)
     transcript: str | None = None
     notes: str | None = None
+    ai_notes: str | None = None
 
 
 class MeetingResponse(BaseModel):
@@ -92,6 +106,7 @@ class MeetingResponse(BaseModel):
     title: str
     transcript: str
     notes: str
+    ai_notes: str
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
@@ -100,7 +115,7 @@ class MeetingResponse(BaseModel):
 class TranscriptSegmentCreate(BaseModel):
     time: str = Field(min_length=1, max_length=30)
     text: str = Field(min_length=1)
-    source: str = Field(default="unknown", pattern="^(you|others|unknown)$")
+    source: str = Field(default="unknown", pattern="^(you|others|unknown)\$")
 
 
 class TranscriptSegmentResponse(BaseModel):
@@ -120,6 +135,13 @@ class MeetingSummaryResponse(BaseModel):
     key_points: list[str]
     decisions: list[str]
     action_items: list[str]
+
+
+class AiNotesPayload(BaseModel):
+    summary: str = ""
+    key_points: list[str] = Field(default_factory=list)
+    decisions: list[str] = Field(default_factory=list)
+    action_items: list[str] = Field(default_factory=list)
 
 
 @app.get("/")
@@ -163,6 +185,7 @@ def create_meeting(
         title=title,
         transcript=meeting_data.transcript,
         notes=meeting_data.notes,
+        ai_notes=meeting_data.ai_notes,
     )
 
     db.add(meeting)
@@ -317,14 +340,9 @@ def transcribe_audio_chunk(
 ) -> str:
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
-        raise RuntimeError(
-            "GROQ_API_KEY is missing. Configure backend/.env."
-        )
+        raise RuntimeError("GROQ_API_KEY is missing. Configure backend/.env.")
 
-    model_name = os.getenv(
-        "GROQ_TRANSCRIPTION_MODEL",
-        "whisper-large-v3-turbo",
-    )
+    model_name = os.getenv("GROQ_TRANSCRIPTION_MODEL", "whisper-large-v3-turbo")
 
     client = Groq(api_key=api_key)
 
@@ -397,6 +415,94 @@ def transcribe_audio_chunk(
     return final_text
 
 
+def generate_rolling_ai_notes(meeting_id: int) -> dict | None:
+    api_key = os.getenv("GROQ_API_KEY")
+    model_name = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+    if not api_key:
+        return None
+
+    db = SessionLocal()
+    try:
+        meeting = db.get(models.Meeting, meeting_id)
+        if not meeting:
+            return None
+
+        statement = (
+            select(models.TranscriptSegment)
+            .where(models.TranscriptSegment.meeting_id == meeting_id)
+            .order_by(models.TranscriptSegment.id.asc())
+        )
+        segments = db.scalars(statement).all()
+
+        if segments:
+            transcript = "\n".join(
+                f"[{segment.time}] {segment.source}: {segment.text}" for segment in segments
+            )
+        else:
+            transcript = (meeting.transcript or "").strip()
+
+        if len(transcript) < 20:
+            return None
+
+        transcript = transcript[-25000:]
+
+        client = Groq(api_key=api_key)
+        response = client.chat.completions.create(
+            model=model_name,
+            response_format={"type": "json_object"},
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are Sidekick live assistant. Given the transcript so far, produce a JSON object with: "
+                        "summary (1-2 sentences), key_points (list of strings), decisions (list of strings), action_items (list of strings). "
+                        "Keep them concise and grounded directly in the text. No filler."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"Meeting: {meeting.title}\n\nTranscript:\n{transcript}",
+                },
+            ],
+        )
+
+        content = response.choices[0].message.content
+        if not content:
+            return None
+
+        parsed = json.loads(content)
+        notes_json = json.dumps(parsed)
+        meeting.ai_notes = notes_json
+        db.commit()
+        return parsed
+    except Exception:
+        logger.exception("Failed to generate rolling AI notes for meeting %s", meeting_id)
+        db.rollback()
+        return None
+    finally:
+        db.close()
+
+
+@app.post("/api/meetings/{meeting_id}/ai-notes")
+def refresh_ai_notes(
+    meeting_id: int,
+    db: Session = Depends(get_db),
+):
+    meeting = db.get(models.Meeting, meeting_id)
+    if meeting is None:
+        raise HTTPException(status_code=404, detail="Meeting not found.")
+
+    res = generate_rolling_ai_notes(meeting_id)
+    if res is None:
+        if meeting.ai_notes:
+            try:
+                return json.loads(meeting.ai_notes)
+            except Exception:
+                pass
+        return {"summary": "", "key_points": [], "decisions": [], "action_items": []}
+    return res
+
+
 @app.websocket("/api/meetings/{meeting_id}/transcribe")
 async def transcribe_meeting_audio(
     websocket: WebSocket,
@@ -411,6 +517,8 @@ async def transcribe_meeting_audio(
         })
         await websocket.close(code=1011)
         return
+
+    segment_counter = 0
 
     try:
         while True:
@@ -532,6 +640,7 @@ async def transcribe_meeting_audio(
                         "source": segment.source,
                     },
                 })
+                segment_counter += 1
             except Exception as db_err:
                 db.rollback()
                 logger.exception("Failed to persist transcript segment to database.")
@@ -539,8 +648,23 @@ async def transcribe_meeting_audio(
                     "type": "error",
                     "message": f"Database error saving segment: {str(db_err)}",
                 })
+                continue
             finally:
                 db.close()
+
+            if segment_counter % 3 == 0:
+                async def _update_notes_task(m_id: int):
+                    updated = await asyncio.to_thread(generate_rolling_ai_notes, m_id)
+                    if updated:
+                        try:
+                            await websocket.send_json({
+                                "type": "ai_notes",
+                                "notes": updated,
+                            })
+                        except Exception:
+                            pass
+
+                asyncio.create_task(_update_notes_task(meeting_id))
 
     except WebSocketDisconnect:
         logger.info("Transcription WebSocket disconnected for meeting %s.", meeting_id)
