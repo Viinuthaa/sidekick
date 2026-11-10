@@ -57,7 +57,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Sidekick API",
     description="Backend API for the Sidekick meeting copilot.",
-    version="0.8.0",
+    version="0.9.0",
     lifespan=lifespan,
 )
 
@@ -142,6 +142,20 @@ class AiNotesPayload(BaseModel):
     key_points: list[str] = Field(default_factory=list)
     decisions: list[str] = Field(default_factory=list)
     action_items: list[str] = Field(default_factory=list)
+
+
+class MeetingQuestionRequest(BaseModel):
+    question: str = Field(min_length=1)
+
+
+class MeetingQuestionResponse(BaseModel):
+    id: int
+    meeting_id: int
+    question: str
+    answer: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 @app.get("/")
@@ -258,6 +272,12 @@ def delete_meeting(meeting_id: int, db: Session = Depends(get_db)):
         )
     )
 
+    db.execute(
+        delete(models.MeetingChatMessage).where(
+            models.MeetingChatMessage.meeting_id == meeting_id
+        )
+    )
+
     db.delete(meeting)
     db.commit()
 
@@ -343,7 +363,6 @@ def transcribe_audio_chunk(
         raise RuntimeError("GROQ_API_KEY is missing. Configure backend/.env.")
 
     model_name = os.getenv("GROQ_TRANSCRIPTION_MODEL", "whisper-large-v3-turbo")
-
     client = Groq(api_key=api_key)
 
     result = client.audio.transcriptions.create(
@@ -415,92 +434,165 @@ def transcribe_audio_chunk(
     return final_text
 
 
-def generate_rolling_ai_notes(meeting_id: int) -> dict | None:
+def compute_rolling_notes(transcript_text: str, meeting_title: str) -> dict:
     api_key = os.getenv("GROQ_API_KEY")
-    model_name = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
-    if not api_key:
-        return None
+    if not api_key or not transcript_text.strip():
+        return {"summary": "", "key_points": [], "decisions": [], "action_items": []}
 
-    db = SessionLocal()
+    model_name = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+    client = Groq(api_key=api_key)
+
+    response = client.chat.completions.create(
+        model=model_name,
+        response_format={"type": "json_object"},
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are Sidekick, an executive meeting assistant. "
+                    "Analyze the conversation transcript provided and generate concise, structured live notes. "
+                    "Respond with a single JSON object containing: "
+                    "'summary' (short 2-sentence overview), "
+                    "'key_points' (array of brief bullet strings), "
+                    "'decisions' (array of decisions reached, empty if none), "
+                    "'action_items' (array of actionable tasks or next steps, empty if none). "
+                    "Only include facts present in the transcript. Do not fabricate."
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"Meeting Title: {meeting_title}\n\nTranscript:\n{transcript_text[-12000:]}",
+            },
+        ],
+    )
+
+    content = response.choices[0].message.content or "{}"
     try:
-        meeting = db.get(models.Meeting, meeting_id)
-        if not meeting:
-            return None
-
-        statement = (
-            select(models.TranscriptSegment)
-            .where(models.TranscriptSegment.meeting_id == meeting_id)
-            .order_by(models.TranscriptSegment.id.asc())
-        )
-        segments = db.scalars(statement).all()
-
-        if segments:
-            transcript = "\n".join(
-                f"[{segment.time}] {segment.source}: {segment.text}" for segment in segments
-            )
-        else:
-            transcript = (meeting.transcript or "").strip()
-
-        if len(transcript) < 20:
-            return None
-
-        transcript = transcript[-25000:]
-
-        client = Groq(api_key=api_key)
-        response = client.chat.completions.create(
-            model=model_name,
-            response_format={"type": "json_object"},
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are Sidekick live assistant. Given the transcript so far, produce a JSON object with: "
-                        "summary (1-2 sentences), key_points (list of strings), decisions (list of strings), action_items (list of strings). "
-                        "Keep them concise and grounded directly in the text. No filler."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": f"Meeting: {meeting.title}\n\nTranscript:\n{transcript}",
-                },
-            ],
-        )
-
-        content = response.choices[0].message.content
-        if not content:
-            return None
-
-        parsed = json.loads(content)
-        notes_json = json.dumps(parsed)
-        meeting.ai_notes = notes_json
-        db.commit()
-        return parsed
+        data = json.loads(content)
+        return {
+            "summary": str(data.get("summary") or ""),
+            "key_points": [str(x) for x in data.get("key_points") or [] if isinstance(x, str)],
+            "decisions": [str(x) for x in data.get("decisions") or [] if isinstance(x, str)],
+            "action_items": [str(x) for x in data.get("action_items") or [] if isinstance(x, str)],
+        }
     except Exception:
-        logger.exception("Failed to generate rolling AI notes for meeting %s", meeting_id)
-        db.rollback()
-        return None
-    finally:
-        db.close()
+        return {"summary": "", "key_points": [], "decisions": [], "action_items": []}
 
 
-@app.post("/api/meetings/{meeting_id}/ai-notes")
-def refresh_ai_notes(
+@app.post("/api/meetings/{meeting_id}/ai-notes", response_model=AiNotesPayload)
+def refresh_meeting_ai_notes(meeting_id: int, db: Session = Depends(get_db)):
+    meeting = db.get(models.Meeting, meeting_id)
+    if meeting is None:
+        raise HTTPException(status_code=404, detail="Meeting not found.")
+
+    statement = (
+        select(models.TranscriptSegment)
+        .where(models.TranscriptSegment.meeting_id == meeting_id)
+        .order_by(models.TranscriptSegment.id.asc())
+    )
+    segments = db.scalars(statement).all()
+
+    if segments:
+        transcript_text = "\n".join(f"[{s.time}] {s.source}: {s.text}" for s in segments)
+    else:
+        transcript_text = (meeting.transcript or "").strip()
+
+    if not transcript_text:
+        return AiNotesPayload()
+
+    notes_dict = compute_rolling_notes(transcript_text, meeting.title)
+    meeting.ai_notes = json.dumps(notes_dict)
+    db.commit()
+
+    return AiNotesPayload(**notes_dict)
+
+
+@app.get("/api/meetings/{meeting_id}/chat", response_model=list[MeetingQuestionResponse])
+def get_meeting_chat_messages(meeting_id: int, db: Session = Depends(get_db)):
+    meeting = db.get(models.Meeting, meeting_id)
+    if meeting is None:
+        raise HTTPException(status_code=404, detail="Meeting not found.")
+
+    statement = (
+        select(models.MeetingChatMessage)
+        .where(models.MeetingChatMessage.meeting_id == meeting_id)
+        .order_by(models.MeetingChatMessage.id.asc())
+    )
+    return db.scalars(statement).all()
+
+
+@app.post("/api/meetings/{meeting_id}/chat", response_model=MeetingQuestionResponse)
+def ask_meeting_question(
     meeting_id: int,
+    payload: MeetingQuestionRequest,
     db: Session = Depends(get_db),
 ):
     meeting = db.get(models.Meeting, meeting_id)
     if meeting is None:
         raise HTTPException(status_code=404, detail="Meeting not found.")
 
-    res = generate_rolling_ai_notes(meeting_id)
-    if res is None:
-        if meeting.ai_notes:
-            try:
-                return json.loads(meeting.ai_notes)
-            except Exception:
-                pass
-        return {"summary": "", "key_points": [], "decisions": [], "action_items": []}
-    return res
+    user_question = payload.question.strip()
+    if not user_question:
+        raise HTTPException(status_code=422, detail="Question cannot be empty.")
+
+    statement = (
+        select(models.TranscriptSegment)
+        .where(models.TranscriptSegment.meeting_id == meeting_id)
+        .order_by(models.TranscriptSegment.id.asc())
+    )
+    segments = db.scalars(statement).all()
+
+    if segments:
+        transcript_text = "\n".join(f"[{s.time}] {s.source}: {s.text}" for s in segments)
+    else:
+        transcript_text = (meeting.transcript or "").strip()
+
+    if not transcript_text:
+        raise HTTPException(status_code=400, detail="Cannot answer questions before transcript content exists.")
+
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=503, detail="GROQ_API_KEY is missing.")
+
+    model_name = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+    client = Groq(api_key=api_key)
+
+    try:
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are Sidekick, an assistant answering questions about a meeting. "
+                        "You must strictly ground your answer in the provided timestamped transcript segments. "
+                        "Cite exact timestamps (like [14:32:10]) when referencing discussions, decisions, or quotes. "
+                        "If the answer is not mentioned in the transcript, state clearly that it was not discussed in this meeting. "
+                        "Keep your answer concise and accurate."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"Meeting: {meeting.title}\n\nTranscript:\n{transcript_text[-25000:]}\n\nQuestion: {user_question}",
+                },
+            ],
+            temperature=0.2,
+        )
+        answer = response.choices[0].message.content or "No response could be generated."
+    except Exception as err:
+        logger.exception("Chat question failed for meeting %d", meeting_id)
+        raise HTTPException(status_code=502, detail=f"Failed to generate answer: {str(err)}")
+
+    chat_record = models.MeetingChatMessage(
+        meeting_id=meeting_id,
+        question=user_question,
+        answer=answer,
+    )
+    db.add(chat_record)
+    db.commit()
+    db.refresh(chat_record)
+
+    return chat_record
 
 
 @app.websocket("/api/meetings/{meeting_id}/transcribe")
@@ -602,6 +694,9 @@ async def transcribe_meeting_audio(
             if len(time_label) > 30:
                 time_label = time_label[:30]
 
+            full_transcript_snapshot = ""
+            meeting_title_snapshot = ""
+
             db = SessionLocal()
             try:
                 meeting = db.get(models.Meeting, meeting_id)
@@ -630,6 +725,10 @@ async def transcribe_meeting_audio(
                 db.commit()
                 db.refresh(segment)
 
+                segment_counter += 1
+                full_transcript_snapshot = meeting.transcript
+                meeting_title_snapshot = meeting.title
+
                 await websocket.send_json({
                     "type": "transcript",
                     "segment": {
@@ -640,7 +739,6 @@ async def transcribe_meeting_audio(
                         "source": segment.source,
                     },
                 })
-                segment_counter += 1
             except Exception as db_err:
                 db.rollback()
                 logger.exception("Failed to persist transcript segment to database.")
@@ -652,19 +750,38 @@ async def transcribe_meeting_audio(
             finally:
                 db.close()
 
-            if segment_counter % 3 == 0:
-                async def _update_notes_task(m_id: int):
-                    updated = await asyncio.to_thread(generate_rolling_ai_notes, m_id)
-                    if updated:
+            if segment_counter % 3 == 0 and len(full_transcript_snapshot) > 60:
+                async def run_rolling_notes_update(transcript_content: str, title: str, mid: int):
+                    try:
+                        notes_data = await asyncio.to_thread(
+                            compute_rolling_notes,
+                            transcript_content,
+                            title,
+                        )
+                        sub_db = SessionLocal()
                         try:
-                            await websocket.send_json({
-                                "type": "ai_notes",
-                                "notes": updated,
-                            })
-                        except Exception:
-                            pass
+                            m = sub_db.get(models.Meeting, mid)
+                            if m:
+                                m.ai_notes = json.dumps(notes_data)
+                                sub_db.commit()
+                        finally:
+                            sub_db.close()
 
-                asyncio.create_task(_update_notes_task(meeting_id))
+                        await websocket.send_json({
+                            "type": "ai_notes",
+                            "meeting_id": mid,
+                            "ai_notes": notes_data,
+                        })
+                    except Exception as err:
+                        logger.warning("Rolling notes generation skipped: %s", err)
+
+                asyncio.create_task(
+                    run_rolling_notes_update(
+                        full_transcript_snapshot,
+                        meeting_title_snapshot,
+                        meeting_id,
+                    )
+                )
 
     except WebSocketDisconnect:
         logger.info("Transcription WebSocket disconnected for meeting %s.", meeting_id)
@@ -690,7 +807,7 @@ def generate_meeting_summary(
         raise HTTPException(status_code=404, detail="Meeting not found.")
 
     api_key = os.getenv("GROQ_API_KEY")
-    model_name = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+    model_name = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
     if not api_key:
         raise HTTPException(

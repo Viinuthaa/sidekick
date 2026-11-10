@@ -13,12 +13,20 @@ type AiNotesData = {
   action_items: string[]
 }
 
+type ChatMessage = {
+  id: number
+  question: string
+  answer: string
+  createdAt?: string
+}
+
 type Session = {
   id: number
   title: string
   createdAt: string
   notes?: string
   aiNotes?: AiNotesData
+  chatMessages?: ChatMessage[]
   transcript?: string
   transcriptEntries?: { id: string; time: string; text: string; source?: 'you' | 'others' | 'unknown' }[]
 }
@@ -43,6 +51,14 @@ type ApiTranscriptSegment = {
   time: string
   text: string
   source: 'you' | 'others' | 'unknown'
+}
+
+type ApiChatMessage = {
+  id: number
+  meeting_id: number
+  question: string
+  answer: string
+  created_at: string
 }
 
 type MeetingSummary = {
@@ -81,6 +97,7 @@ function toSession(meeting: ApiMeeting): Session {
     }),
     notes: meeting.notes ?? '',
     aiNotes: parseAiNotes(meeting.ai_notes),
+    chatMessages: [],
     transcript: meeting.transcript ?? '',
     transcriptEntries: [],
   }
@@ -157,8 +174,11 @@ function App() {
   const [activeSession, setActiveSession] = useState<Session | null>(null)
   const [isLoadingSessions, setIsLoadingSessions] = useState(true)
   const [apiError, setApiError] = useState('')
-  const [activeNotesTab, setActiveNotesTab] = useState<'manual' | 'ai'>('manual')
+  const [activeNotesTab, setActiveNotesTab] = useState<'manual' | 'ai' | 'chat'>('manual')
   const [isRefreshingAiNotes, setIsRefreshingAiNotes] = useState(false)
+  const [chatQuestion, setChatQuestion] = useState('')
+  const [isAskingQuestion, setIsAskingQuestion] = useState(false)
+  const [chatError, setChatError] = useState('')
 
   const audioCaptureRef =
     useRef<MeetingAudioCaptureController | null>(null)
@@ -628,6 +648,47 @@ function App() {
     }
   }
 
+  async function submitChatQuestion(event: React.FormEvent) {
+    event.preventDefault()
+    if (!activeSession || !chatQuestion.trim()) return
+
+    const q = chatQuestion.trim()
+    setChatQuestion('')
+    setChatError('')
+    setIsAskingQuestion(true)
+
+    try {
+      const res = await apiRequest<ApiChatMessage>(
+        `/api/meetings/${activeSession.id}/chat`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ question: q }),
+        },
+      )
+
+      const msg: ChatMessage = {
+        id: res.id,
+        question: res.question,
+        answer: res.answer,
+      }
+
+      setActiveSession((current) =>
+        current
+          ? {
+              ...current,
+              chatMessages: [...(current.chatMessages || []), msg],
+            }
+          : current,
+      )
+    } catch (err) {
+      setChatError(
+        err instanceof Error ? err.message : 'Failed to get an answer.',
+      )
+    } finally {
+      setIsAskingQuestion(false)
+    }
+  }
+
   function openPage(nextPage: Page) {
     stopTranscription()
     setPage(nextPage)
@@ -645,9 +706,10 @@ function App() {
     setActiveNotesTab('manual')
 
     try {
-      const segments = await apiRequest<ApiTranscriptSegment[]>(
-        `/api/meetings/${session.id}/segments`,
-      )
+      const [segments, chats] = await Promise.all([
+        apiRequest<ApiTranscriptSegment[]>(`/api/meetings/${session.id}/segments`),
+        apiRequest<ApiChatMessage[]>(`/api/meetings/${session.id}/chat`).catch(() => []),
+      ])
 
       const transcriptEntries = segments.map((segment) => ({
         id: String(segment.id),
@@ -656,22 +718,30 @@ function App() {
         source: segment.source,
       }))
 
+      const chatMessages = chats.map((c) => ({
+        id: c.id,
+        question: c.question,
+        answer: c.answer,
+      }))
+
       setSessions((current) =>
         current.map((item) =>
-          item.id === session.id ? { ...item, transcriptEntries } : item,
+          item.id === session.id
+            ? { ...item, transcriptEntries, chatMessages }
+            : item,
         ),
       )
 
       setActiveSession((current) =>
         current?.id === session.id
-          ? { ...current, transcriptEntries }
+          ? { ...current, transcriptEntries, chatMessages }
           : current,
       )
     } catch (error) {
       setApiError(
         error instanceof Error
           ? error.message
-          : 'Could not load the saved transcript segments.',
+          : 'Could not load the saved meeting data.',
       )
     }
   }
@@ -977,6 +1047,16 @@ function App() {
                         <span className="ai-badge">Ready</span>
                       ) : null}
                     </button>
+                    <button
+                      type="button"
+                      className={`notes-tab-button ${activeNotesTab === 'chat' ? 'selected' : ''}`}
+                      onClick={() => setActiveNotesTab('chat')}
+                    >
+                      Ask Meeting
+                      {(activeSession.chatMessages || []).length > 0 && (
+                        <span className="ai-badge">{activeSession.chatMessages?.length}</span>
+                      )}
+                    </button>
 
                     {activeNotesTab === 'ai' && (
                       <button
@@ -990,7 +1070,7 @@ function App() {
                     )}
                   </div>
 
-                  {activeNotesTab === 'manual' ? (
+                  {activeNotesTab === 'manual' && (
                     <div className="meeting-notes">
                       <textarea
                         id="meeting-notes"
@@ -1002,7 +1082,9 @@ function App() {
                         placeholder="Capture your personal thoughts here..."
                       />
                     </div>
-                  ) : (
+                  )}
+
+                  {activeNotesTab === 'ai' && (
                     <div className="ai-notes-panel">
                       {activeSession.aiNotes ? (
                         <>
@@ -1058,6 +1140,52 @@ function App() {
                           {isRecording && <p className="ai-dim-text">Analyzing transcript in background...</p>}
                         </div>
                       )}
+                    </div>
+                  )}
+
+                  {activeNotesTab === 'chat' && (
+                    <div className="meeting-qa-panel">
+                      <div className="qa-history">
+                        {(activeSession.chatMessages || []).length > 0 ? (
+                          (activeSession.chatMessages || []).map((msg) => (
+                            <div key={msg.id} className="qa-entry">
+                              <div className="qa-bubble user-bubble">
+                                <strong>You:</strong> {msg.question}
+                              </div>
+                              <div className="qa-bubble ai-bubble">
+                                <strong>Sidekick:</strong> {msg.answer}
+                              </div>
+                            </div>
+                          ))
+                        ) : (
+                          <div className="ai-empty-placeholder">
+                            <p>Ask anything discussed in this meeting.</p>
+                            <p className="ai-dim-text">Example: "What deadlines were set?" or "Who owns the frontend?"</p>
+                          </div>
+                        )}
+                      </div>
+
+                      {chatError && (
+                        <p className="microphone-error" role="alert">{chatError}</p>
+                      )}
+
+                      <form onSubmit={submitChatQuestion} className="qa-form">
+                        <input
+                          type="text"
+                          className="qa-input"
+                          placeholder="Ask a question about this meeting..."
+                          value={chatQuestion}
+                          onChange={(e) => setChatQuestion(e.target.value)}
+                          disabled={isAskingQuestion}
+                        />
+                        <button
+                          type="submit"
+                          className="start-session qa-submit-btn"
+                          disabled={isAskingQuestion || !chatQuestion.trim()}
+                        >
+                          {isAskingQuestion ? 'Answering…' : 'Ask ↗'}
+                        </button>
+                      </form>
                     </div>
                   )}
                 </div>

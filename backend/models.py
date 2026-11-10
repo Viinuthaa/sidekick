@@ -47,3 +47,25 @@ class TranscriptSegment(Base):
         server_default=func.now(),
         nullable=False,
     )
+
+
+class MeetingChatMessage(Base):
+    __tablename__ = "meeting_chat_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    meeting_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("meetings.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    answer: Mapped[str] = mapped_column(Text, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        nullable=False,
+    )
