@@ -115,7 +115,7 @@ class MeetingResponse(BaseModel):
 class TranscriptSegmentCreate(BaseModel):
     time: str = Field(min_length=1, max_length=30)
     text: str = Field(min_length=1)
-    source: str = Field(default="unknown", pattern="^(you|others|unknown)\$")
+    source: str = Field(default="unknown", pattern="^(you|others|unknown)$")
 
 
 class TranscriptSegmentResponse(BaseModel):
